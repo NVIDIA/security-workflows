@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pre-commit hook manifest. Consumed by downstream `.pre-commit-config.yaml` files.
+
+- id: secret-scan-trufflehog
+  name: check for leaked secrets (trufflehog)
+  description: >-
+    Scans changed files for verified secret leaks using TruffleHog.
+    Requires the `trufflehog` binary on $PATH (see hooks/trufflehog.sh).
+  entry: hooks/trufflehog.sh
+  language: script       # trufflehog go.mod `replace` directives break pre-commit's golang installer
+  pass_filenames: true   # scope scan to changed files
+  require_serial: true   # one invocation per run
+  stages: [pre-commit, pre-push]
