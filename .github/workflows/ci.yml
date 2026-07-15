@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# CI + integration tests for this repository's own sources. The published
+# workflow/hooks are `workflow_call`/pre-commit and never self-trigger,
+# so this workflow is what exercises them:
+#   - lint:      validates every workflow/hook file (pre-commit stack).
+#   - integration (Pulse): positive (clean -> pass) and negative (planted secret -> detected) checks that catch a scan that stops working.
+
+name: CI (lint + scan self-tests)
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-on-${{ github.event_name }}-from-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (pre-commit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.x'
+      - name: Run pre-commit
+        env:
+          # The pre-commit secret-scan hook needs the trufflehog binary on $PATH,
+          # which isn't installed on this lint runner, so skip it here. The Pulse
+          # scan engine is exercised end-to-end by the integration jobs below.
+          SKIP: secret-scan-trufflehog
+        run: |
+          python -m pip install --upgrade pip
+          pip install pre-commit
+          pre-commit run --all-files --show-diff-on-failure
+
+  # POSITIVE (Pulse): reuse the enterprise reusable workflow against this (clean) repo.
+  secret-scan-pulse-positive:
+    name: Secret scan (Pulse) — positive
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read  # required by codeql-action/upload-sarif (get-a-workflow-run)
+    uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      # code-scanning (upload-sarif) available if (public OR GHAS).
+      # this repo = internal + GHAS enabled -> upload-sarif.
+      # upload-artifact: downloadable redacted SARIF for inspection.
+      upload-sarif: true
+      upload-artifact: true
+
+  # NEGATIVE (Pulse): detection via the Pulse container on a runtime fixture (same reason as the OSS negative job).
+  secret-scan-pulse-negative:
+    name: Secret scan (Pulse) — negative (detection)
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    runs-on: linux-amd64-cpu4
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PULSE_IMAGE: ${{ vars.SECRET_SCAN_PULSE_IMAGE }}:${{ vars.SECRET_SCAN_PULSE_IMAGE_TAG }}
+      SCAN_ARGS: --results=verified,unknown,unverified --fail
+    steps:
+      - name: Import nvcr.io credentials from Vault
+        uses: hashicorp/vault-action@4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b  # v3.4.0
+        with:
+          url: ${{ vars.NV_VAULT_URL }}
+          role: ${{ vars.NVCR_VAULT_ROLE }}
+          method: jwt
+          path: ${{ vars.NVCR_VAULT_JWT_PATH }}
+          jwtGithubAudience: https://token.actions.githubusercontent.com
+          namespace: ${{ vars.NVCR_VAULT_NAMESPACE }}
+          secrets: |
+            ${{ vars.NVCR_VAULT_SECRET_PATH }} username | NVCR_IO_USERNAME ;
+            ${{ vars.NVCR_VAULT_SECRET_PATH }} password | NVCR_IO_PASSWORD
+
+      - name: Log in to nvcr.io
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        with:
+          registry: nvcr.io
+          username: ${{ env.NVCR_IO_USERNAME }}
+          password: ${{ env.NVCR_IO_PASSWORD }}
+
+      - name: Build fixture
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/dirty"
+          mkdir -p "$RUNNER_TEMP/dirty"
+          openssl genrsa -out "$RUNNER_TEMP/dirty/id_rsa" 2048 2>/dev/null
+
+      - name: Planted secret must be detected
+        run: |
+          set -euo pipefail
+          # Redirect scanner output to a temp file so the fixture's key material
+          # is never printed to the job log. Detection is asserted on the exit code.
+          if docker run --rm -v "$RUNNER_TEMP/dirty:/scan:ro" --entrypoint bash "$PULSE_IMAGE" \
+               -lc "pulse-secret-scanner filesystem /scan $SCAN_ARGS" > "$RUNNER_TEMP/neg-scan.log" 2>&1; then
+            echo "::error::Negative test failed — scanner missed a planted secret (false negative)."
+            exit 1
+          else
+            echo "PASS: planted secret detected (scanner output suppressed)."
+          fi
+
+      - name: Log out of nvcr.io
+        if: always()
+        run: docker logout nvcr.io
