@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pre-commit configuration for NVIDIA/security-workflows.
+# Dogfoods the published `secret-scan-trufflehog` hook from `repo: local`.
+# Requires `trufflehog` on $PATH (see hooks/trufflehog.sh for install).
+
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
+ci:
+  autofix_commit_msg: "[pre-commit.ci] auto code formatting"
+  autofix_prs: false
+  autoupdate_branch: ""
+  autoupdate_commit_msg: "[pre-commit.ci] pre-commit autoupdate"
+  autoupdate_schedule: quarterly
+  skip: [secret-scan-trufflehog]  # binary not on pre-commit.ci sandbox
+
+repos:
+  # Dogfood — source locally so uncommitted edits to the wrapper get tested.
+  - repo: local
+    hooks:
+      - id: secret-scan-trufflehog
+        name: check for leaked secrets (trufflehog)
+        description: verified-leak scan; mirrors .pre-commit-hooks.yaml contract.
+        entry: hooks/trufflehog.sh
+        language: script
+        pass_filenames: true
+        require_serial: true
+        stages: [pre-commit, pre-push]
+
+  # Universal hygiene — whitespace, line endings, large files, YAML parse.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-yaml
+
+  # YAML style and quality (configured via .yamllint.yaml).
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.36.2
+    hooks:
+      - id: yamllint
+        args: [-c=.yamllint.yaml]
+
+  # Shell script linting for hooks/trufflehog.sh.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  # GitHub Actions workflow linting — workflows only, not composite actions.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+
+  # Spell-check for typos in markdown and config files.
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+        args: [--ignore-words=.codespell-ignore.txt]
+
+default_language_version:
+  python: python3

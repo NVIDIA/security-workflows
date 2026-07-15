@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# yamllint configuration for NVIDIA/security-workflows.
+#
+# Tuned for GitHub Actions YAML, which has three quirks the stock rules
+# fight with:
+#   1. Workflow files don't begin with `---`.
+#   2. `on:` is YAML's truthy-1.1 token; stock `truthy` flags it as a key.
+#   3. Long expression strings (`${{ ... }}`, pinned 40-char SHAs in
+#      comments) routinely exceed 80 chars without losing readability.
+#
+# Everything else uses yamllint's default rules.
+
+extends: default
+
+rules:
+  line-length:
+    max: 200
+    level: warning
+
+  truthy:
+    # Allow `on:` (and `yes:` / `no:` / `off:` if they ever appear) as
+    # YAML keys. We still flag truthy values inside maps/sequences.
+    check-keys: false
+
+  # Workflow files don't carry a `---` header; mandating one would force
+  # a churn-only edit to every existing file.
+  document-start: disable
+
+  # GitHub Actions inline comments after `runs-on:` etc. are common and
+  # don't need rigid spacing rules.
+  comments:
+    min-spaces-from-content: 1

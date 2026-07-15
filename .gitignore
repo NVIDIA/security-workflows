@@ -1,0 +1,20 @@
+# Cursor / Claude / Codex local IDE state — never commit.
+# `.cursor/` in particular may contain internal NVIDIA skill files copied in
+# from corp tooling; keep them out of the public history.
+.cursor/
+.claude/local/
+.codex/
+.guardrails/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Editor scratch
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Pre-commit local cache
+.pre-commit-cache/

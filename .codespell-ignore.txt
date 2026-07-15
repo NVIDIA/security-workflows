@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Codespell ignore-list for NVIDIA/security-workflows.
+#
+# Add one word per line for false positives surfaced by codespell during
+# pre-commit runs (e.g. project-specific identifiers, vendor names,
+# acronyms that match common typos). Do NOT add real misspellings here.
+#
+# Entries here override codespell's built-in dictionary and are case-
+# insensitive.
+
+# Surname of lead maintainer Ganesh Manal (codespell flags as "Manual").
+manal
