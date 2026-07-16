@@ -8,8 +8,20 @@ inputs:
   service-label:
     description: Non-sensitive capability label used in status messages.
     required: true
-  gateway-origin:
-    description: Approved HTTPS gateway origin.
+  tunnel-proxy-server:
+    description: Approved tunnel proxy host and port.
+    required: true
+  tunnel-join-token:
+    description: Approved workload-identity join token.
+    required: true
+  tunnel-application:
+    description: Approved gateway application name.
+    required: true
+  tunnel-local-port:
+    description: Loopback port for the local application tunnel.
+    required: true
+  tunnel-client-command:
+    description: Runner-provided tunnel client executable.
     required: true
   identity-audience:
     description: GitHub OIDC audience accepted by the gateway.
@@ -28,20 +40,129 @@ runs:
       shell: bash
       env:
         SERVICE_LABEL: ${{ inputs.service-label }}
-        GATEWAY_ORIGIN: ${{ inputs.gateway-origin }}
+        TUNNEL_PROXY_SERVER: ${{ inputs.tunnel-proxy-server }}
+        TUNNEL_JOIN_TOKEN: ${{ inputs.tunnel-join-token }}
+        TUNNEL_APPLICATION: ${{ inputs.tunnel-application }}
+        TUNNEL_LOCAL_PORT: ${{ inputs.tunnel-local-port }}
+        TUNNEL_CLIENT_COMMAND: ${{ inputs.tunnel-client-command }}
         IDENTITY_AUDIENCE: ${{ inputs.identity-audience }}
         IDENTITY_HEADER_NAME: ${{ inputs.identity-header-name }}
         HEALTH_PATH: ${{ inputs.health-path }}
       run: |
         set -euo pipefail
 
+        umask 077
+        TUNNEL_CONFIG="$(mktemp "${RUNNER_TEMP}/service-route-config.XXXXXX")"
+        TUNNEL_LOG="$(mktemp "${RUNNER_TEMP}/service-route-log.XXXXXX")"
+        TUNNEL_PID=""
+        export TUNNEL_CONFIG
+
+        cleanup() {
+          local status=$?
+          trap - EXIT
+          if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
+            kill "$TUNNEL_PID" 2>/dev/null || true
+          fi
+          if [[ -n "$TUNNEL_PID" ]]; then
+            wait "$TUNNEL_PID" 2>/dev/null || true
+          fi
+          rm -f "$TUNNEL_CONFIG" "$TUNNEL_LOG"
+          exit "$status"
+        }
+        trap cleanup EXIT
+
+        python3 - <<'PY'
+        import json
+        import os
+        import re
+        from pathlib import Path
+
+
+        def stop(message):
+            print(f"::error::{message}")
+            raise SystemExit(1)
+
+
+        def validate_name(value, label):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+                stop(f"{label} configuration is invalid.")
+            return value
+
+
+        proxy = os.environ["TUNNEL_PROXY_SERVER"]
+        try:
+            host, raw_proxy_port = proxy.rsplit(":", 1)
+            proxy_port = int(raw_proxy_port)
+        except (ValueError, TypeError):
+            stop("Tunnel proxy configuration is invalid.")
+        labels = host.split(".")
+        if (
+            not labels
+            or len(host) > 253
+            or not 1 <= proxy_port <= 65535
+            or any(
+                not re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+                    label,
+                )
+                for label in labels
+            )
+        ):
+            stop("Tunnel proxy configuration is invalid.")
+
+        join_token = validate_name(
+            os.environ["TUNNEL_JOIN_TOKEN"], "Tunnel join token"
+        )
+        application = validate_name(
+            os.environ["TUNNEL_APPLICATION"], "Tunnel application"
+        )
+        try:
+            local_port = int(os.environ["TUNNEL_LOCAL_PORT"])
+        except ValueError:
+            stop("Tunnel local port configuration is invalid.")
+        if not 1024 <= local_port <= 65535:
+            stop("Tunnel local port configuration is invalid.")
+
+        config = "\n".join(
+            [
+                "version: v2",
+                f"proxy_server: {json.dumps(proxy)}",
+                "onboarding:",
+                "  join_method: github",
+                f"  token: {json.dumps(join_token)}",
+                "storage:",
+                "  type: memory",
+                "outputs: []",
+                "services:",
+                "  - type: application-tunnel",
+                f"    app_name: {json.dumps(application)}",
+                f"    listen: tcp://127.0.0.1:{local_port}",
+                "",
+            ]
+        )
+        Path(os.environ["TUNNEL_CONFIG"]).write_text(config, encoding="utf-8")
+        PY
+
+        if [[ ! "$TUNNEL_CLIENT_COMMAND" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]{0,255}$ ]] \
+          || [[ "$TUNNEL_CLIENT_COMMAND" == *".."* ]]; then
+          echo "::error::Service tunnel client configuration is invalid."
+          exit 1
+        fi
+        if ! TUNNEL_CLIENT_PATH="$(command -v -- "$TUNNEL_CLIENT_COMMAND")"; then
+          echo "::error::Service tunnel client is unavailable."
+          exit 1
+        fi
+        "$TUNNEL_CLIENT_PATH" start -c "$TUNNEL_CONFIG" >"$TUNNEL_LOG" 2>&1 &
+        TUNNEL_PID=$!
+
         python3 - <<'PY'
         import json
         import os
         import re
         import ssl
+        import time
         from urllib.error import HTTPError
-        from urllib.parse import urlencode, urlsplit
+        from urllib.parse import urlencode
         from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 
@@ -76,27 +197,6 @@ runs:
             return value
 
 
-        def validate_origin(value):
-            parsed = urlsplit(value)
-            try:
-                port = parsed.port
-            except ValueError:
-                stop("Gateway origin is invalid.")
-            if (
-                parsed.scheme != "https"
-                or not parsed.hostname
-                or not re.fullmatch(r"[A-Za-z0-9.-]+", parsed.hostname)
-                or parsed.username is not None
-                or parsed.password is not None
-                or parsed.query
-                or parsed.fragment
-                or parsed.path not in {"", "/"}
-                or port is not None and not 1 <= port <= 65535
-            ):
-                stop("Gateway origin is invalid.")
-            return value.rstrip("/")
-
-
         ssl_context = ssl.create_default_context()
 
 
@@ -104,13 +204,15 @@ runs:
             return build_opener(HTTPSHandler(context=ssl_context), NoRedirects())
 
 
-        def request_status(url, token, header_name, method):
+        def request_status(
+            url, token=None, header_name=None, method="GET", tolerate_transport=False
+        ):
+            headers = {"User-Agent": "Security-Workflow-Preflight/1.0"}
+            if token is not None and header_name is not None:
+                headers[header_name] = token
             request = Request(
                 url,
-                headers={
-                    header_name: token,
-                    "User-Agent": "Security-Workflow-Preflight/1.0",
-                },
+                headers=headers,
                 method=method,
             )
             try:
@@ -119,13 +221,32 @@ runs:
             except HTTPError as error:
                 return error.code
             except Exception as error:
+                if tolerate_transport:
+                    return None
                 stop(f"Service transport failed ({type(error).__name__}).")
 
 
         label = validate_label(os.environ["SERVICE_LABEL"])
-        origin = validate_origin(os.environ["GATEWAY_ORIGIN"])
         path = validate_path(os.environ["HEALTH_PATH"])
         header_name = validate_header_name(os.environ["IDENTITY_HEADER_NAME"])
+        try:
+            local_port = int(os.environ["TUNNEL_LOCAL_PORT"])
+        except ValueError:
+            stop("Tunnel local port configuration is invalid.")
+        if not 1024 <= local_port <= 65535:
+            stop("Tunnel local port configuration is invalid.")
+        origin = f"http://127.0.0.1:{local_port}"
+
+        for _ in range(30):
+            ready_status = request_status(
+                f"{origin}/ready", tolerate_transport=True
+            )
+            if ready_status is not None and 200 <= ready_status < 300:
+                break
+            time.sleep(1)
+        else:
+            stop("Service tunnel did not become ready.")
+
         audience = os.environ["IDENTITY_AUDIENCE"]
         if not re.fullmatch(r"[A-Za-z0-9._:/-]{1,256}", audience):
             stop("Identity audience configuration is invalid.")
