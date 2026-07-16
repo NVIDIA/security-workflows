@@ -13,7 +13,7 @@ This repository publishes the security-compliance machinery that downstream NVID
 
 Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
 
-The repository is currently an early scaffold (`v0.1.0` pre-release). The pre-commit surface ships its first hook — secret scanning: the local-advisory hook [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) → [`hooks/trufflehog.sh`](hooks/trufflehog.sh) (open-source `trufflesecurity/trufflehog`). The CI enforcement workflow (`secret-scan-pulse.yml` — NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`) is planned. Pulse is container-only, so it is CI-only; the pre-commit lane deliberately uses the OSS CLI to stay within the <10s DX budget on developer machines. See [`ROADMAP.md`](ROADMAP.md) for per-scan status.
+The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the local-advisory pre-commit hook [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) → [`hooks/trufflehog.sh`](hooks/trufflehog.sh) (open-source `trufflesecurity/trufflehog`). Pulse is container-only, so it is CI-only; the pre-commit lane deliberately uses the OSS CLI to stay within the <10s DX budget on developer machines.
 
 ---
 

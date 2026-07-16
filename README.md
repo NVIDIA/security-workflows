@@ -5,7 +5,7 @@
 
 Centrally maintained, reusable GitHub Actions workflows for the security-compliance scans rolled out by the NVIDIA GitHub-First initiative.
 
-This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It is built around two artifact types: **reusable GitHub Actions workflows** (`workflow_call`) under `.github/workflows/` for job-level server-side enforcement, and **pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for local-advisory checks on the developer's machine. Pre-commit hooks delegate to thin wrapper scripts under [`hooks/`](hooks/) that encode the NVIDIA-approved args and resolve the scanner binary from `$PATH`; consumers need the underlying scanner binaries installed locally (per-tool install steps live in each wrapper's header). Both surfaces are pinned per the [surface-specific policy below](#pin-policy-per-surface). The pre-commit surface ships its first hook (secret scanning); the reusable-workflow surface is not published yet — see [`ROADMAP.md`](ROADMAP.md) for per-scan status.
+This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It publishes two artifact types: **reusable GitHub Actions workflows** (`workflow_call`) under [`.github/workflows/`](.github/workflows/README.md) for job-level server-side enforcement, and **pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for local-advisory checks on the developer's machine. Pre-commit hooks delegate to thin wrapper scripts under [`hooks/`](hooks/) that encode the NVIDIA-approved args and resolve the scanner binary from `$PATH`; consumers need the underlying scanner binaries installed locally (per-tool install steps live in each wrapper's header). Both surfaces are pinned per the [surface-specific policy below](#pin-policy-per-surface).
 
 Pre-commit and CI are complementary, not alternatives: pre-commit is local-advisory (best-effort, optimized for developer experience) and CI is server-side enforcement (authoritative, fail-closed). The CI surface is a reusable workflow (declared `permissions:`, isolated job) — the preferred shape for security gates. A scan category may ship the CI workflow, the pre-commit hook, or both, depending on whether it fits the <10s local-execution budget.
 
@@ -38,7 +38,7 @@ The six scan categories below are the in-scope surface for this repository. Spec
 
 Detects credentials, API keys, tokens, and other sensitive material introduced in a pull request before they merge. Runs on the diff for performance and on full-repo for periodic baseline sweeps.
 
-Local pre-commit checks use `secret-scan-trufflehog`, built on the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) CLI — see [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for the hook. The CI enforcement lane (NVIDIA's licensed TruffleHog Enterprise, the Pulse Secret Scanner, on `nv-gha-runners`) is planned — see [`ROADMAP.md`](ROADMAP.md) for status.
+The CI surface is `secret-scan-pulse`, which runs NVIDIA's licensed TruffleHog Enterprise (Pulse Secret Scanner) on `nv-gha-runners`. Each run publishes redacted findings to the repository Security tab (maintainers only); raw scanner output is not written to the job log. Local pre-commit checks use `secret-scan-trufflehog`, built on the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) CLI. See the [workflow catalogue](.github/workflows/README.md) for the CI interface and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for the hook.
 
 ### License scanning
 
@@ -62,7 +62,30 @@ Flags terminology and content that conflicts with NVIDIA brand, legal, or inclus
 
 ## Example
 
-The pre-commit hook is consumed via the [pre-commit](https://pre-commit.com/) framework. See [Pin policy per surface](#pin-policy-per-surface) for the recommended pin (release tag for pre-commit hooks).
+The expected consumption pattern for each surface is shown below. See [Pin policy per surface](#pin-policy-per-surface) for the recommended pin in each context (40-character commit SHA for workflows, release tag for pre-commit hooks).
+
+**Reusable workflow** — drop into a new isolated job (the CI security gate):
+
+```yaml
+on: [pull_request]
+
+permissions:
+  contents: read
+  id-token: write          # OIDC → Vault → nvcr.io image pull
+  security-events: write   # publish redacted SARIF to code scanning
+  actions: read            # required by upload-sarif action
+
+jobs:
+  secret-scan:
+    uses: NVIDIA/security-workflows/.github/workflows/secret-scan-pulse.yml@<COMMIT-SHA>
+    # Optional overrides — see the workflow file for the full interface:
+    # with:
+    #   runs-on: linux-amd64-cpu4              # nv-gha-runners label
+    #   results: verified,unknown   # workflow default
+    #   fail-on-findings: false                # warn-only during initial rollout
+```
+
+The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md). Each workflow's inputs, required permissions, and security trade-offs are documented in the workflow catalogue README and inline in each workflow's `workflow_call` block.
 
 **Pre-commit hook** (in a consumer's `.pre-commit-config.yaml`):
 
@@ -78,15 +101,13 @@ The pre-commit hook is consumed via the [pre-commit](https://pre-commit.com/) fr
     - id: secret-scan-trufflehog
 ```
 
-The reusable-workflow consumption example will land alongside the first published workflow (the CI enforcement lane); see [`ROADMAP.md`](ROADMAP.md).
-
 ## Getting Started
 
 ### Consumers (downstream NVIDIA repositories)
 
-Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`; hooks use `language: script` and delegate to wrapper scripts under `hooks/` that encode NVIDIA's chosen args and fail-policy. Pre-commit runs on developer machines only — consumers need the underlying scanner binaries installed locally, and per-tool install steps live in each wrapper's header. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
+Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`; hooks use `language: script` and delegate to wrapper scripts under [`hooks/`](hooks/) that encode NVIDIA's chosen args and fail-policy. Pre-commit runs on developer machines only — consumers need the underlying scanner binaries installed locally, and per-tool install steps live in each wrapper's header. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
 
-Per-surface onboarding instructions — hook arguments, required developer-side tooling, security trade-offs — are documented in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) and each wrapper's header under [`hooks/`](hooks/). Reusable-workflow onboarding lands with the first published workflow. Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
+Per-surface onboarding instructions — runner labels, trigger model, hook arguments, required developer-side tooling, security trade-offs — are documented inline: each workflow file's `workflow_call` definition and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
 
 The current release status of each scan category lives in [`ROADMAP.md`](ROADMAP.md).
 
@@ -156,7 +177,7 @@ The deprecation window will depend on the impact of the change but will usually 
 
 ## Related Projects
 
-- [`pre-commit`](https://pre-commit.com/) — Upstream framework that will consume the `.pre-commit-hooks.yaml` manifest published by this repository. The [Installation](https://pre-commit.com/#install) and [Usage](https://pre-commit.com/#usage) sections cover `pre-commit install`, `pre-commit run`, and `pre-commit autoupdate` — the commands consumers will use to install and refresh the hooks defined here.
+- [`pre-commit`](https://pre-commit.com/) — Upstream framework that consumes the `.pre-commit-hooks.yaml` manifest in this repository. The [Installation](https://pre-commit.com/#install) and [Usage](https://pre-commit.com/#usage) sections cover `pre-commit install`, `pre-commit run`, and `pre-commit autoupdate` — the commands consumers will use to install and refresh the hooks defined here.
 - [`NVIDIA-GitHub-Management/PLC-OSS-Template`](https://github.com/NVIDIA-GitHub-Management/PLC-OSS-Template) — NVIDIA OSS repository template.
 
 ## Repositories Using These Workflows
