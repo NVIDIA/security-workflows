@@ -28,3 +28,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Secret-scan (Pulse) — always publish redacted SARIF to code scanning; remove `upload-sarif` and `upload-artifact` caller inputs; redirect scanner stderr off the job log; use `pulse-secret-scan-*` temp artifact names and `pulse-secret-scan` SARIF category.
+
+- `THIRD_PARTY_NOTICES.md` — add direct workflow dependencies (`vault-action`, `docker/login-action`, `setup-python`, `codeql-action/upload-sarif`) with SHA pins.

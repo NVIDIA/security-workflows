@@ -81,7 +81,7 @@ jobs:
     # Optional overrides — see the workflow file for the full interface:
     # with:
     #   runs-on: linux-amd64-cpu4              # nv-gha-runners label
-    #   extra-args: "--results=verified,unknown"   # workflow default
+    #   results: verified,unknown   # workflow default
     #   fail-on-findings: false                # warn-only during initial rollout
 ```
 

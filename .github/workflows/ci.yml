@@ -67,7 +67,7 @@ jobs:
     env:
       PULSE_IMAGE: ${{ vars.SECRET_SCAN_PULSE_IMAGE }}:${{ vars.SECRET_SCAN_PULSE_IMAGE_TAG }}
       # Broader than workflow default — planted RSA keys are unverified pattern matches.
-      SCAN_ARGS: --results=verified,unknown,unverified --fail
+      SCAN_RESULTS: verified,unknown,unverified
     steps:
       - name: Import nvcr.io credentials from Vault
         uses: hashicorp/vault-action@4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b  # v3.4.0
@@ -101,8 +101,10 @@ jobs:
           set -euo pipefail
           # Redirect scanner output to a temp file so the fixture's key material
           # is never printed to the job log. Detection is asserted on the exit code.
-          if docker run --rm -v "$RUNNER_TEMP/dirty:/scan:ro" --entrypoint bash "$PULSE_IMAGE" \
-               -lc "pulse-secret-scanner filesystem /scan $SCAN_ARGS" > "$RUNNER_TEMP/neg-scan.log" 2>&1; then
+          if docker run --rm -v "$RUNNER_TEMP/dirty:/scan:ro" \
+               --entrypoint pulse-secret-scanner "$PULSE_IMAGE" \
+               filesystem /scan "--results=${SCAN_RESULTS}" --fail \
+               > "$RUNNER_TEMP/neg-scan.log" 2>&1; then
             echo "::error::Negative test failed — scanner missed a planted secret (false negative)."
             exit 1
           else
