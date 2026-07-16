@@ -38,7 +38,7 @@ The six scan categories below are the in-scope surface for this repository. Spec
 
 Detects credentials, API keys, tokens, and other sensitive material introduced in a pull request before they merge. Runs on the diff for performance and on full-repo for periodic baseline sweeps.
 
-The CI surface is `secret-scan-pulse`, which runs NVIDIA's licensed TruffleHog Enterprise (Pulse Secret Scanner) on `nv-gha-runners`. Local pre-commit checks use `secret-scan-trufflehog`, built on the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) CLI. See the [workflow catalogue](.github/workflows/README.md) for the CI interface and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for the hook.
+The CI surface is `secret-scan-pulse`, which runs NVIDIA's licensed TruffleHog Enterprise (Pulse Secret Scanner) on `nv-gha-runners`. Each run publishes redacted findings to the repository Security tab (maintainers only); raw scanner output is not written to the job log. Local pre-commit checks use `secret-scan-trufflehog`, built on the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) CLI. See the [workflow catalogue](.github/workflows/README.md) for the CI interface and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for the hook.
 
 ### License scanning
 
@@ -71,7 +71,9 @@ on: [pull_request]
 
 permissions:
   contents: read
-  id-token: write   # secret-scan-pulse mints a GitHub OIDC token to fetch nvcr.io creds from Vault
+  id-token: write          # OIDC → Vault → nvcr.io image pull
+  security-events: write   # publish redacted SARIF to code scanning
+  actions: read            # required by upload-sarif action
 
 jobs:
   secret-scan:
@@ -79,7 +81,7 @@ jobs:
     # Optional overrides — see the workflow file for the full interface:
     # with:
     #   runs-on: linux-amd64-cpu4              # nv-gha-runners label
-    #   extra-args: "--results=verified,unknown"
+    #   extra-args: "--results=verified,unknown"   # workflow default
     #   fail-on-findings: false                # warn-only during initial rollout
 ```
 
