@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Service route probe
+description: Validate an approved service route without logging identity or response data.
+
+inputs:
+  service-label:
+    description: Non-sensitive capability label used in status messages.
+    required: true
+  gateway-origin:
+    description: Approved HTTPS gateway origin.
+    required: true
+  identity-audience:
+    description: GitHub OIDC audience accepted by the gateway.
+    required: true
+  identity-header-name:
+    description: Header used to send the GitHub OIDC token.
+    required: true
+  health-path:
+    description: Gateway path for the service health endpoint.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate service route
+      shell: bash
+      env:
+        SERVICE_LABEL: ${{ inputs.service-label }}
+        GATEWAY_ORIGIN: ${{ inputs.gateway-origin }}
+        IDENTITY_AUDIENCE: ${{ inputs.identity-audience }}
+        IDENTITY_HEADER_NAME: ${{ inputs.identity-header-name }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+      run: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import os
+        import re
+        import ssl
+        from urllib.error import HTTPError
+        from urllib.parse import urlencode, urlsplit
+        from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+
+
+        class NoRedirects(HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+
+        def stop(message):
+            print(f"::error::{message}")
+            raise SystemExit(1)
+
+
+        def validate_label(value):
+            if not re.fullmatch(r"[A-Za-z0-9 ._-]{1,64}", value):
+                stop("Service label is invalid.")
+            return value
+
+
+        def validate_header_name(value):
+            if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}", value):
+                stop("Identity header configuration is invalid.")
+            return value
+
+
+        def validate_path(value):
+            if not re.fullmatch(r"/[A-Za-z0-9._~/-]+", value):
+                stop("Service health path is invalid.")
+            segments = value.split("/")[1:]
+            if "//" in value or any(part in {"", ".", ".."} for part in segments):
+                stop("Service health path is invalid.")
+            return value
+
+
+        def validate_origin(value):
+            parsed = urlsplit(value)
+            try:
+                port = parsed.port
+            except ValueError:
+                stop("Gateway origin is invalid.")
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or not re.fullmatch(r"[A-Za-z0-9.-]+", parsed.hostname)
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+                or parsed.path not in {"", "/"}
+                or port is not None and not 1 <= port <= 65535
+            ):
+                stop("Gateway origin is invalid.")
+            return value.rstrip("/")
+
+
+        ssl_context = ssl.create_default_context()
+
+
+        def opener():
+            return build_opener(HTTPSHandler(context=ssl_context), NoRedirects())
+
+
+        def request_status(url, token, header_name, method):
+            request = Request(
+                url,
+                headers={
+                    header_name: token,
+                    "User-Agent": "Security-Workflow-Preflight/1.0",
+                },
+                method=method,
+            )
+            try:
+                with opener().open(request, timeout=20) as response:
+                    return response.status
+            except HTTPError as error:
+                return error.code
+            except Exception as error:
+                stop(f"Service transport failed ({type(error).__name__}).")
+
+
+        label = validate_label(os.environ["SERVICE_LABEL"])
+        origin = validate_origin(os.environ["GATEWAY_ORIGIN"])
+        path = validate_path(os.environ["HEALTH_PATH"])
+        header_name = validate_header_name(os.environ["IDENTITY_HEADER_NAME"])
+        audience = os.environ["IDENTITY_AUDIENCE"]
+        if not re.fullmatch(r"[A-Za-z0-9._:/-]{1,256}", audience):
+            stop("Identity audience configuration is invalid.")
+
+        request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+        request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+        if not request_url or not request_token:
+            stop("GitHub OIDC is unavailable for this job.")
+
+        separator = "&" if "?" in request_url else "?"
+        oidc_request = Request(
+            request_url + separator + urlencode({"audience": audience}),
+            headers={"Authorization": f"bearer {request_token}"},
+        )
+        try:
+            with opener().open(oidc_request, timeout=20) as response:
+                token = json.load(response).get("value", "")
+        except Exception as error:
+            stop(f"GitHub OIDC acquisition failed ({type(error).__name__}).")
+        if not isinstance(token, str) or not token or token != token.strip():
+            stop("GitHub OIDC returned an invalid token.")
+
+        health_status = request_status(
+            f"{origin}{path}", token, header_name, "GET"
+        )
+        print(f"{label} health check: HTTP {health_status}")
+        if not 200 <= health_status < 300:
+            stop(f"{label} health check failed.")
+
+        denied_status = request_status(
+            f"{origin}{path}", token, header_name, "POST"
+        )
+        print(f"{label} denied-method check: HTTP {denied_status}")
+        if denied_status != 403:
+            stop(f"{label} denied-method check did not return HTTP 403.")
+        PY
