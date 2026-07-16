@@ -14,7 +14,7 @@
 
 | Scan | Reusable workflow status | Pre-commit hook status | Notes |
 |---|---|---|---|
-| Secret scanning | Planned | Planned | Pulse Secret Scanner is the planned CI enforcement lane (runs the Pulse image on `nv-gha-runners`); OSS TruffleHog is the planned local pre-commit advisory lane. |
+| Secret scanning | Planned | Pilot (pre-tag testing) — `secret-scan-trufflehog` published in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) | OSS TruffleHog is the local pre-commit advisory lane; Pulse Secret Scanner is the planned CI enforcement lane. |
 | License scanning | Planned | Planned | — |
 | Vulnerability scanning | Planned | Out of scope (>10s DX budget) | CI workflow only |
 | Malware scanning | Planned | Out of scope (off-runner verdict service) | CI workflow only |
