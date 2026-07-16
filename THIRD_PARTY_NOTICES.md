@@ -14,6 +14,7 @@ again before distribution.
 
 | Component | Version / Pin | How it is used | License |
 |---|---:|---|---|
+| [TruffleHog](https://github.com/trufflesecurity/trufflehog) | Developer-installed CLI (see [`hooks/trufflehog.sh`](hooks/trufflehog.sh)) | Invoked as a locally installed CLI by the `secret-scan-trufflehog` pre-commit wrapper. Not distributed or vendored by this repository. | [AGPL-3.0](https://github.com/trufflesecurity/trufflehog/blob/main/LICENSE) |
 | [pre-commit](https://github.com/pre-commit/pre-commit) | Developer/consumer installed | Framework that consumes `.pre-commit-hooks.yaml`; not distributed by this repository. | [MIT](https://github.com/pre-commit/pre-commit/blob/main/LICENSE) |
 | [pre-commit-hooks](https://github.com/pre-commit/pre-commit-hooks) | `v5.0.0` | Development-time hygiene hooks in this repository's `.pre-commit-config.yaml`. | [MIT](https://github.com/pre-commit/pre-commit-hooks/blob/main/LICENSE) |
 | [yamllint](https://github.com/adrienverge/yamllint) | `v1.36.2` | Development-time YAML linting hook. | [GPL-3.0-or-later](https://github.com/adrienverge/yamllint/blob/master/LICENSE) |
