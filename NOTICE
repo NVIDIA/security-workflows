@@ -1,0 +1,9 @@
+NVIDIA Security Workflows
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This project is distributed under the Apache License, Version 2.0.
+See LICENSE for the full license text.
+
+Third-party notices and license references for externally invoked tools,
+development checks, and included third-party text are documented in
+THIRD_PARTY_NOTICES.md.
