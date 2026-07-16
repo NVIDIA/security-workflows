@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Repository scaffolding — `README`, `GOVERNANCE`, `CONTRIBUTING`, `SUPPORT`, `MAINTAINERS`, `SECURITY`, `CODE_OF_CONDUCT`, `LICENSE`.
 
-- Secret-scan (Pulse) reusable workflow — [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml). NVIDIA's enterprise secret scanner (Pulse Secret Scanner) is the CI enforcement lane, with a fail-closed default. By default only the pass/fail result is shown, so no findings are exposed publicly; detailed results can optionally be sent to the repository's Security dashboard (maintainers only). Runs on NVIDIA's self-hosted runners. Internal registry/Vault details are sourced from repository/org variables, not hardcoded.
+- Secret-scan (Pulse) reusable workflow — [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml). NVIDIA's enterprise secret scanner (Pulse Secret Scanner) is the CI enforcement lane, with a fail-closed default. Each run converts findings to redacted SARIF and publishes them to the repository Security tab (maintainers only); raw scanner output is kept off the job log. Default `--results=verified,unknown`. Runs on NVIDIA's self-hosted runners. Internal registry/Vault details are sourced from repository/org variables, not hardcoded.
 
 - Secret-scan (OSS) pre-commit hook — [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) + [`hooks/trufflehog.sh`](hooks/trufflehog.sh), composing upstream [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog), fail-closed with NVIDIA default `--results=verified`. This is the local-advisory lane; the CI enforcement lane is the Pulse workflow above.
 
@@ -24,3 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   NVIDIA-internal development and no external contribution intake.
 
 - Pin policy ([`README.md` → Pin policy per surface](README.md#pin-policy-per-surface)) — 40-character commit SHA for GHA `uses:`; release tag for pre-commit `rev:`; branch references not acceptable. Release tags cut on consumer-visible behaviour or contract changes.
+
+### Changed
+
+- Secret-scan (Pulse) — always publish redacted SARIF to code scanning; remove `upload-sarif` and `upload-artifact` caller inputs; redirect scanner stderr off the job log; use `pulse-secret-scan-*` temp artifact names and `pulse-secret-scan` SARIF category.

@@ -20,13 +20,19 @@ is CI enforcement. Inputs, defaults, and required permissions are documented inl
 # In a consumer's `.github/workflows/<your-name>.yml`:
 on: [pull_request]
 
+permissions:
+  contents: read
+  id-token: write          # OIDC → Vault → nvcr.io image pull
+  security-events: write   # publish redacted SARIF to code scanning
+  actions: read            # required by upload-sarif action
+
 jobs:
   secret-scan:
     uses: NVIDIA/security-workflows/.github/workflows/secret-scan-pulse.yml@<COMMIT-SHA>
     # Optional overrides — see the workflow file for the full interface:
     # with:
     #   runs-on: linux-amd64-cpu4              # nv-gha-runners label
-    #   extra-args: "--results=verified,unknown"
+    #   extra-args: "--results=verified,unknown"   # workflow default
     #   fail-on-findings: false                # warn-only during initial rollout
 ```
 

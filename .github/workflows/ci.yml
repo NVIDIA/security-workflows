@@ -55,12 +55,6 @@ jobs:
       security-events: write
       actions: read  # required by codeql-action/upload-sarif (get-a-workflow-run)
     uses: ./.github/workflows/secret-scan-pulse.yml
-    with:
-      # code-scanning (upload-sarif) available if (public OR GHAS).
-      # this repo = internal + GHAS enabled -> upload-sarif.
-      # upload-artifact: downloadable redacted SARIF for inspection.
-      upload-sarif: true
-      upload-artifact: true
 
   # NEGATIVE (Pulse): detection via the Pulse container on a runtime fixture (same reason as the OSS negative job).
   secret-scan-pulse-negative:
@@ -72,6 +66,7 @@ jobs:
       id-token: write
     env:
       PULSE_IMAGE: ${{ vars.SECRET_SCAN_PULSE_IMAGE }}:${{ vars.SECRET_SCAN_PULSE_IMAGE_TAG }}
+      # Broader than workflow default — planted RSA keys are unverified pattern matches.
       SCAN_ARGS: --results=verified,unknown,unverified --fail
     steps:
       - name: Import nvcr.io credentials from Vault
