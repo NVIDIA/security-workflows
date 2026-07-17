@@ -21,7 +21,10 @@ inputs:
     description: Loopback port for the local application tunnel.
     required: true
   tunnel-client-command:
-    description: Runner-provided tunnel client executable.
+    description: Installed tunnel client executable.
+    required: true
+  tunnel-client-version:
+    description: Pinned tunnel client version.
     required: true
   identity-audience:
     description: GitHub OIDC audience accepted by the gateway.
@@ -36,6 +39,11 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install service tunnel client
+      uses: teleport-actions/setup@b638ff596557cc3959eb6b5287d5e58e0c8ac6a6 # v1
+      with:
+        version: ${{ inputs.tunnel-client-version }}
+
     - name: Validate service route
       shell: bash
       env:

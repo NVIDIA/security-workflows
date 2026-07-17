@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Malware scanner image-source preflight
+name: Container scanner preflight
 
 on:
   push:
@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   preflight:
-    name: Validate malware scanner image-source route
+    name: Validate container scanner route
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ${{ vars.SCANNER_VALIDATION_RUNNER }}
     timeout-minutes: 3
@@ -25,15 +25,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Probe malware scanner image-source route
+      - name: Probe container scanner route
         uses: ./.github/actions/service-route-probe
         with:
-          service-label: Malware scanner image source
+          service-label: Container scanner
           tunnel-proxy-server: ${{ vars.SCANNER_TUNNEL_PROXY_SERVER }}
           tunnel-join-token: ${{ vars.SCANNER_TUNNEL_JOIN_TOKEN }}
           tunnel-application: ${{ vars.SCANNER_TUNNEL_APPLICATION }}
           tunnel-local-port: ${{ vars.SCANNER_TUNNEL_LOCAL_PORT }}
           tunnel-client-command: ${{ vars.SCANNER_TUNNEL_CLIENT_COMMAND }}
+          tunnel-client-version: ${{ vars.SCANNER_TUNNEL_CLIENT_VERSION }}
           identity-audience: ${{ vars.SCANNER_IDENTITY_AUDIENCE }}
           identity-header-name: ${{ vars.SCANNER_IDENTITY_HEADER }}
-          health-path: ${{ vars.MALWARE_SCANNER_IMAGE_SOURCE_HEALTH_PATH }}
+          health-path: ${{ vars.CONTAINER_SCANNER_HEALTH_PATH }}
