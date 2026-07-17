@@ -29,12 +29,12 @@ jobs:
         uses: ./.github/actions/service-route-probe
         with:
           service-label: Container scanner
-          tunnel-proxy-server: ${{ vars.SCANNER_TUNNEL_PROXY_SERVER }}
-          tunnel-join-token: ${{ vars.SCANNER_TUNNEL_JOIN_TOKEN }}
-          tunnel-application: ${{ vars.SCANNER_TUNNEL_APPLICATION }}
-          tunnel-local-port: ${{ vars.SCANNER_TUNNEL_LOCAL_PORT }}
-          tunnel-client-command: ${{ vars.SCANNER_TUNNEL_CLIENT_COMMAND }}
-          tunnel-client-version: ${{ vars.SCANNER_TUNNEL_CLIENT_VERSION }}
-          identity-audience: ${{ vars.SCANNER_IDENTITY_AUDIENCE }}
-          identity-header-name: ${{ vars.SCANNER_IDENTITY_HEADER }}
-          health-path: ${{ vars.CONTAINER_SCANNER_HEALTH_PATH }}
+          tunnel-proxy-server: ${{ secrets.SCANNER_TUNNEL_PROXY_SERVER }}
+          tunnel-join-token: ${{ secrets.SCANNER_TUNNEL_JOIN_TOKEN }}
+          tunnel-application: ${{ secrets.SCANNER_TUNNEL_APPLICATION }}
+          tunnel-local-port: ${{ secrets.SCANNER_TUNNEL_LOCAL_PORT }}
+          tunnel-client-command: ${{ secrets.SCANNER_TUNNEL_CLIENT_COMMAND }}
+          tunnel-client-version: ${{ secrets.SCANNER_TUNNEL_CLIENT_VERSION }}
+          identity-audience: ${{ secrets.SCANNER_IDENTITY_AUDIENCE }}
+          identity-header-name: ${{ secrets.SCANNER_IDENTITY_HEADER }}
+          health-path: ${{ secrets.CONTAINER_SCANNER_HEALTH_PATH }}
