@@ -5,7 +5,7 @@
 # workflow/hooks are `workflow_call`/pre-commit and never self-trigger,
 # so this workflow is what exercises them:
 #   - lint:      validates every workflow/hook file (pre-commit stack).
-#   - integration (Pulse): positive (clean -> pass) and negative (planted secret -> detected) checks that catch a scan that stops working.
+#   - integration (Pulse): tests all three failure_policy scenarios with positive and negative cases.
 
 name: CI (lint + scan self-tests)
 
@@ -45,20 +45,27 @@ jobs:
           pip install pre-commit
           pre-commit run --all-files --show-diff-on-failure
 
-  # POSITIVE (Pulse): reuse the enterprise reusable workflow against this (clean) repo.
-  secret-scan-pulse-positive:
-    name: Secret scan (Pulse) — positive
+  # ============================================================================
+  # failure_policy: strict (strictest) — must fail on ANY finding
+  # ============================================================================
+
+  # POSITIVE (Pulse, policy=strict): clean repo should pass
+  secret-scan-pulse-policy-strict-positive:
+    name: Secret scan (Pulse, failure_policy=strict) — positive
     if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
     permissions:
       contents: read
       id-token: write
       security-events: write
-      actions: read  # required by codeql-action/upload-sarif (get-a-workflow-run)
+      actions: read
     uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      failure_policy: strict
 
-  # NEGATIVE (Pulse): detection via the Pulse container on a runtime fixture (same reason as the OSS negative job).
-  secret-scan-pulse-negative:
-    name: Secret scan (Pulse) — negative (detection)
+  # NEGATIVE (Pulse, policy=strict): a planted secret MUST be detected (exit 185),
+  # which failure_policy=strict maps to a job failure.
+  secret-scan-pulse-policy-strict-negative:
+    name: Secret scan (Pulse, failure_policy=strict) — negative (assert exit 185)
     if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
     runs-on: linux-amd64-cpu4
     permissions:
@@ -66,7 +73,6 @@ jobs:
       id-token: write
     env:
       PULSE_IMAGE: ${{ vars.SECRET_SCAN_PULSE_IMAGE }}:${{ vars.SECRET_SCAN_PULSE_IMAGE_TAG }}
-      # Broader than workflow default — planted RSA keys are unverified pattern matches.
       SCAN_RESULTS: verified,unknown,unverified
     steps:
       - name: Import nvcr.io credentials from Vault
@@ -89,28 +95,95 @@ jobs:
           username: ${{ env.NVCR_IO_USERNAME }}
           password: ${{ env.NVCR_IO_PASSWORD }}
 
-      - name: Build fixture
+      - name: Build fixture with unverified secret
         run: |
           set -euo pipefail
-          rm -rf "$RUNNER_TEMP/dirty"
-          mkdir -p "$RUNNER_TEMP/dirty"
-          openssl genrsa -out "$RUNNER_TEMP/dirty/id_rsa" 2048 2>/dev/null
+          rm -rf "$RUNNER_TEMP/dirty-strict"
+          mkdir -p "$RUNNER_TEMP/dirty-strict"
+          openssl genrsa -out "$RUNNER_TEMP/dirty-strict/id_rsa" 2048 2>/dev/null
 
-      - name: Planted secret must be detected
+      - name: Assert scanner returns exit 185 for the planted unverified finding
         run: |
-          set -euo pipefail
-          # Redirect scanner output to a temp file so the fixture's key material
-          # is never printed to the job log. Detection is asserted on the exit code.
-          if docker run --rm -v "$RUNNER_TEMP/dirty:/scan:ro" \
-               --entrypoint pulse-secret-scanner "$PULSE_IMAGE" \
-               filesystem /scan "--results=${SCAN_RESULTS}" --fail \
-               > "$RUNNER_TEMP/neg-scan.log" 2>&1; then
-            echo "::error::Negative test failed — scanner missed a planted secret (false negative)."
+          # Capture the exact exit code — do not treat "any non-zero" as success,
+          # otherwise a Docker/scanner error would masquerade as a detection.
+          set +e
+          docker run --rm -v "$RUNNER_TEMP/dirty-strict:/scan:ro" \
+            --entrypoint pulse-secret-scanner "$PULSE_IMAGE" \
+            filesystem /scan "--results=${SCAN_RESULTS}" --fail \
+            > "$RUNNER_TEMP/neg-strict.log" 2>&1
+          code=$?
+          set -e
+          if [ "$code" -ne 185 ]; then
+            echo "::error::expected exit 185 (unverified finding), got ${code}"
             exit 1
-          else
-            echo "PASS: planted secret detected (scanner output suppressed)."
           fi
+          echo "✓ scanner returned 185; failure_policy=strict maps this to a job failure"
 
       - name: Log out of nvcr.io
         if: always()
         run: docker logout nvcr.io
+
+  # ============================================================================
+  # failure_policy: unverified (default) — fail only on verified secrets, warn on unverified
+  # ============================================================================
+
+  # POSITIVE (Pulse, policy=unverified): clean repo should pass
+  secret-scan-pulse-policy-unverified-positive:
+    name: Secret scan (Pulse, failure_policy=unverified) — positive
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      failure_policy: unverified
+
+  # NEGATIVE (Pulse, policy=unverified) via the reusable workflow itself:
+  # a planted unverified secret is detected (185) but failure_policy=unverified
+  # keeps the job GREEN. Expected outcome is success, so it does not red the run.
+  secret-scan-pulse-policy-unverified-negative:
+    name: Secret scan (Pulse, failure_policy=unverified) — negative (must pass despite unverified finding)
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      failure_policy: unverified
+      ci_test_setup: true
+
+  # ============================================================================
+  # failure_policy: all (most permissive) — warn only, never fail
+  # ============================================================================
+
+  # POSITIVE (Pulse, policy=all): clean repo should pass
+  secret-scan-pulse-policy-all-positive:
+    name: Secret scan (Pulse, failure_policy=all) — positive
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      failure_policy: all
+
+  # NEGATIVE (Pulse, policy=all) via the reusable workflow itself:
+  # findings are warn-only under failure_policy=all, so the job stays GREEN.
+  secret-scan-pulse-policy-all-negative:
+    name: Secret scan (Pulse, failure_policy=all) — negative (must pass despite findings)
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      failure_policy: all
+      ci_test_setup: true
