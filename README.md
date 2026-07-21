@@ -80,9 +80,8 @@ jobs:
     uses: NVIDIA/security-workflows/.github/workflows/secret-scan-pulse.yml@<COMMIT-SHA>
     # Optional overrides — see the workflow file for the full interface:
     # with:
-    #   runs-on: linux-amd64-cpu4              # nv-gha-runners label
-    #   results: verified,unknown   # workflow default
-    #   fail-on-findings: false                # warn-only during initial rollout
+    #   runs-on: linux-amd64-cpu4   # nv-gha-runners label
+    #   failure_policy: strict      # fail on any finding (default: unverified — fail verified, warn unverified)
 ```
 
 The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md). Each workflow's inputs, required permissions, and security trade-offs are documented in the workflow catalogue README and inline in each workflow's `workflow_call` block.
