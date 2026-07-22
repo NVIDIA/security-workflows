@@ -32,7 +32,7 @@ jobs:
     # Optional overrides — see the workflow file for the full interface:
     # with:
     #   runs-on: linux-amd64-cpu4   # nv-gha-runners label
-    #   failure_policy: unverified  # fail on any finding (default: unverified — fail verified, warn unverified)
+    #   failure_policy: strict      # fail on any finding (default: unverified — fail verified, warn unverified)
 ```
 
 Pin `<COMMIT-SHA>` to a 40-character commit SHA per the [pin policy](../../README.md#pin-policy-per-surface).
