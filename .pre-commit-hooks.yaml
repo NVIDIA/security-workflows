@@ -6,10 +6,11 @@
 - id: secret-scan-trufflehog
   name: check for leaked secrets (trufflehog)
   description: >-
-    Scans changed files for verified secret leaks using TruffleHog.
-    Requires the `trufflehog` binary on $PATH (see hooks/trufflehog.sh).
+    Scans changed files for verified secret leaks using TruffleHog. The wrapper
+    downloads a pinned, checksum-verified TruffleHog release into a per-user
+    cache on first use — no manual install required (see hooks/trufflehog.sh).
   entry: hooks/trufflehog.sh
-  language: script       # trufflehog go.mod `replace` directives break pre-commit's golang installer
+  language: script       # self-installing wrapper
   pass_filenames: true   # scope scan to changed files
   require_serial: true   # one invocation per run
   stages: [pre-commit, pre-push]
