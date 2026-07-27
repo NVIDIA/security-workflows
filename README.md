@@ -27,7 +27,7 @@ The goal of this repository is to give every NVIDIA repository a consistent, aud
 Workflows in this repository are designed around a few shared principles:
 
 - **One contract per scan type.** Each scan category is exposed as a single reusable workflow with a stable `workflow_call` interface. Callers depend on the interface, not the implementation underneath.
-- **Self-hosted-runner first.** Workflows target NVIDIA's self-hosted runner platform (`nv-gha-runners`) by default, with a fallback path for GitHub-hosted runners where appropriate.
+- **Self-hosted runners required for internal-service scans.** Workflows that use NVIDIA-internal services — Vault (OIDC) and `nvcr.io` scanner images, e.g. the Pulse secret scan — run **only** on `nv-gha-runners`; those services are unreachable from GitHub-hosted runners. Workflows with no such dependency (e.g. CodeQL SAST) may run on GitHub-hosted runners.
 - **Fail-closed by default.** A finding blocks the merge unless an explicit, documented exception applies.
 - **Audit-ready output.** Each run emits a structured audit record for downstream compliance roll-up.
 - **Compose, don't reimplement.** Workflows here orchestrate lower-level building blocks — upstream scanner actions (pinned by SHA inside each workflow) and, where appropriate, vetted internal actions — rather than re-implementing scanner integrations. The version, default args, and fail policy of each scan are owned in this repository so that every consumer inherits one audited contract.
@@ -125,11 +125,9 @@ Maintainer escalation paths are in [`MAINTAINERS.md`](MAINTAINERS.md).
 
 ### Runners
 
-Workflows in this repository target NVIDIA's self-hosted runner platform (`nv-gha-runners`) as the default. CPU-only runner pools are sufficient for every scan category currently in scope.
+The Vault- and `nvcr.io`-backed CI workflows (e.g. the Pulse secret scan) run **only on NVIDIA's self-hosted runners (`nv-gha-runners`)**. They mint short-lived credentials to pull the scanner image and are reachable only from self-hosted runners. On GitHub-hosted runners (`ubuntu-latest`) the Vault step fails and the scan cannot run. Workflows without those dependencies (e.g. CodeQL SAST) may use GitHub-hosted runners.
 
-A fallback path for GitHub-hosted runners (`ubuntu-latest`) is supported for repositories that have not yet onboarded to `nv-gha-runners`. Specific runner labels are accepted as inputs to each workflow so that consumers can choose the right pool for their repository.
-
-The runner platform itself is documented at [`docs.gha-runners.nvidia.com`](https://docs.gha-runners.nvidia.com/).
+Pass an actual runner **label** to `runs-on` (e.g. `linux-amd64-cpu4`). CPU-only pools are sufficient for every scan category in scope. See [runner-groups.md](https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/runner-groups.md) for the label↔group mapping and [`docs.gha-runners.nvidia.com`](https://docs.gha-runners.nvidia.com/) for the platform.
 
 ### GitHub repository requirements
 
@@ -140,6 +138,18 @@ Consumer repositories are expected to:
 - For downstream consumer repositories that accept external-contributor pull requests on `nv-gha-runners`: have the `copy-pr-bot` GitHub App installed and configured per the runner platform's onboarding guidance. This does not change this repository's no-external-contributions policy.
 
 Specific per-workflow requirements are documented inline in each workflow file's `workflow_call` definition.
+
+### Onboarding a repository
+
+To run the CI security workflows in your repository:
+
+1. **Get self-hosted runner access.** Your org must have the [`nvidia-runner-mgmt`](https://github.com/apps/nvidia-runner-mgmt) app installed, and your repo must be granted a runner group (e.g. `nv-cpu-general`) via a PR to [`nv-gha-runners/enterprise-runner-configuration`](https://github.com/nv-gha-runners/enterprise-runner-configuration) — see [Requesting Access](https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/requesting-access.md).
+2. **Confirm the Vault / Pulse Actions variables exist** (secret-scan only). The Pulse workflow reads repo/org variables `NV_VAULT_URL`, `NVCR_VAULT_*`, `SECRET_SCAN_PULSE_IMAGE`, and `SECRET_SCAN_PULSE_IMAGE_TAG`. If unset, the Vault step fails with `Input required and not supplied: url` — ask the GitHub-First platform team to provision them.
+3. **Add the caller workflow** — reference the reusable workflow pinned by commit SHA, grant the permissions it declares, and set `runs-on` to a real label (see the [Example](#example)).
+4. **Add the pre-commit hook** (optional, local-advisory) — see the [Example](#example).
+5. **Require the check** in branch protection once it is green.
+
+Reference onboarding PRs: [`NVIDIA/cccl#10010`](https://github.com/NVIDIA/cccl/pull/10010) and [`NVIDIA/cuda-python#2405`](https://github.com/NVIDIA/cuda-python/pull/2405).
 
 ## Versioning
 
