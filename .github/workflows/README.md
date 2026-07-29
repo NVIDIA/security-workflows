@@ -1,30 +1,66 @@
 # Reusable Workflows
 
-Job-level surface (`workflow_call`). Reusable workflows declare their own `permissions:` and run in an isolated job; this is the surface for CI security gates.
+Job-level surface (`workflow_call`). Each workflow declares its own `permissions:` and runs in an isolated job — this is the surface for CI security gates.
+Inputs and defaults are documented inline in each workflow's `workflow_call` block; per-scan release status is in [`ROADMAP.md`](../../ROADMAP.md).
 
 ## Catalogue
 
 | Workflow | Scan | Scanner |
 |---|---|---|
-| [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Secret | Pulse Secret Scanner — TruffleHog Enterprise, NVIDIA-licensed, from the `nvcr.io` image (pinned inside the workflow) |
+| [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Secret | Pulse Secret Scanner — TruffleHog Enterprise, NVIDIA-licensed, Self-hosted runners only |
+| [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | SAST | CodeQL (`github/codeql-action`, pinned inside the workflow) |
 
-The secret scan also ships a local-advisory **pre-commit hook** (`secret-scan-trufflehog`, built on open-source
-[`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog)) declared in
-[`.pre-commit-hooks.yaml`](../../.pre-commit-hooks.yaml): pre-commit is developer-machine advisory, this workflow
-is CI enforcement. Inputs, defaults, and required permissions are documented inline in each workflow's
-`workflow_call` block. Scan-category status is in [`ROADMAP.md`](../../ROADMAP.md).
+## Using a workflow
 
-## Consumer pattern
+These rules apply to **every** workflow in this directory. Scan-specific details are under [Scans](#scans).
+
+**1. Pin by commit SHA.** Reference each workflow by a 40-character commit SHA, per the [pin policy](../../README.md#pin-policy-per-surface).
+Branch or tag references (`@main`, `@latest`) are not acceptable.
+
+**2. Grant every permission the workflow declares.** A caller must grant *at least* what the reusable workflow declares, or the run fails at load time with `requesting '<scope>', but is only allowed '<scope>: none'`.
+Copy the `permissions:` block from the scan's section — do not trim it to what looks necessary.
+
+**3. Use a nv-gha-runner label as assigned** `runs-on` takes a label (e.g. `linux-amd64-cpu4`), See [runner-groups.md](https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/runner-groups.md).
+
+**4. Onboard the repository first.** Runner access and repository-level expectations (Actions enabled, branch protection, `copy-pr-bot` for fork PRs) are in [Onboarding a repository](../../README.md#onboarding-a-repository).
+
+### Caller skeleton
 
 ```yaml
 # In a consumer's `.github/workflows/<your-name>.yml`:
 on: [pull_request]
 
 permissions:
+  # copy from the scan's section below
+
+jobs:
+  scan:
+    uses: NVIDIA/security-workflows/.github/workflows/<workflow>.yml@<COMMIT-SHA>
+    with:
+      # scan-specific inputs — see the workflow's `workflow_call` block
+```
+
+## Scans
+
+### Secret scan — [`secret-scan-pulse.yml`](secret-scan-pulse.yml)
+
+CI enforcement lane. Runs the Pulse Secret Scanner container and publishes redacted SARIF to the repository Security tab.
+The companion local-advisory lane is the `secret-scan-trufflehog`.
+**pre-commit hook** (open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog)) declared in [`.pre-commit-hooks.yaml`](../../.pre-commit-hooks.yaml).
+
+Scan-specific prerequisites:
+
+- **Self-hosted runners only.** The job authenticates via OIDC → Vault and pulls the scanner image from `nvcr.io`; neither is reachable from GitHub-hosted runners.
+- **Vault / Pulse Actions variables** must be visible to the repository (`NV_VAULT_URL`, `NVCR_VAULT_*`, `SECRET_SCAN_PULSE_IMAGE`, `SECRET_SCAN_PULSE_IMAGE_TAG`).
+
+Key inputs: `runs-on` (default `linux-amd64-cpu4`), `failure_policy` (`unverified` default — fail on verified secrets, warn on unverified; `strict` — fail on any finding; `all` — warn only).
+
+```yaml
+permissions:
   contents: read
   id-token: write          # OIDC → Vault → nvcr.io image pull
   security-events: write   # publish redacted SARIF to code scanning
-  actions: read            # required by upload-sarif action
+  actions: read
 
 jobs:
   secret-scan:
@@ -35,12 +71,44 @@ jobs:
     #   failure_policy: strict      # fail on any finding (default: unverified — fail verified, warn unverified)
 ```
 
-Pin `<COMMIT-SHA>` to a 40-character commit SHA per the [pin policy](../../README.md#pin-policy-per-surface).
-Branch references (`@main`, `@latest`) are not acceptable.
+### SAST — [`sast-scan-codeql.yml`](sast-scan-codeql.yml)
+
+**Choose the right delivery model first.** CodeQL is native to GitHub, so the baseline for most repositories is **Default setup applied via an org/enterprise Security Configuration** — zero YAML in the repo, GitHub-managed CodeQL upgrades, auto-applied to current and future repos.
+
+| Model | Use for | How |
+|---|---|---|
+| **Default setup** (Security Configuration) | The vast majority of repos | Org/enterprise owner enables it centrally; no file in the repo |
+| **This reusable workflow** | Repos needing custom query packs, path filters, a shared build step, or a centrally-pinned action | Add a caller (below) |
+| **Standalone advanced** | Rare repos with a bespoke, non-generalizable build | Repo-local `codeql.yml` |
+
+Use `sast-scan-codeql.yml` only when you actually need the customization. If you don't, use Default setup.
+
+Scan-specific prerequisites:
+
+- **Licensing.** Public repos get code scanning free. Private/internal repos require GitHub Advanced Security (Code Security).
+- **Default setup must be off.** Default setup and an advanced/reusable CodeQL workflow are mutually exclusive; if Default setup is on, this workflow's upload fails.
+- **Runner toolchain.** `build-mode: none` needs no toolchain. `build-mode: autobuild` needs the language's build tools.
+- **Rollout alerts-first.** Enable without a merge gate, triage the backlog, then enforce via branch protection — turning enforcement on fleet-wide on day one lights every repo red.
+
+Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `linux-amd64-cpu4`), `build-mode` (default `none`), `queries` (default `security-extended`), `packs`, `config-file`.
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  codeql:
+    uses: NVIDIA/security-workflows/.github/workflows/sast-scan-codeql.yml@<COMMIT-SHA>
+    with:
+      languages: '["actions"]'
+```
 
 ## Adding a workflow
 
 1. Land the file as `<scan>-<tool>.yml` in this directory.
-2. Add a row to the Catalogue table above.
-3. Update [`ROADMAP.md`](../../ROADMAP.md) and add a bullet under `[Unreleased]` in [`CHANGELOG.md`](../../CHANGELOG.md).
-4. Update the top-level [`README.md`](../../README.md) consumer example only if the new workflow changes the canonical usage pattern.
+2. Add a row to the [Catalogue](#catalogue).
+3. Add a section under [Scans](#scans) with **only** what is specific to that scan — prerequisites, key inputs, permissions block, and a minimal caller snippet. Do not restate the rules in [Using a workflow](#using-a-workflow).
+4. Update [`ROADMAP.md`](../../ROADMAP.md) and add a bullet under `[Unreleased]` in [`CHANGELOG.md`](../../CHANGELOG.md).
+5. Update the top-level [`README.md`](../../README.md) only if the canonical usage pattern changes.
