@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Security Workflows — SAST (CodeQL) reusable workflow.
+#
+# SCOPE: For most repositories, enable CodeQL via GitHub "Default setup" applied through an org/enterprise Security Configuration (zero YAML, GitHub-managed upgrades).
+# Use THIS reusable workflow only when a repo needs custom query packs, path filtering, a shared build step, or a centrally-pinned CodeQL action.
+#
+# PREREQUISITES for a consuming repository:
+#   * Public repos: code scanning is free — no GHAS license required.
+#   * Private/internal repos: GitHub Advanced Security (Code Security) MUST be enabled or CodeQL SARIF upload is rejected.
+#   * CodeQL "Default setup" MUST be OFF on the repo — Default setup and an advanced/reusable workflow are mutually exclusive.
+#   * The runner must provide any toolchain/runtime a compiled language build needs (build-mode: autobuild/manual). build-mode: none needs no toolchain.
+
+name: SAST (CodeQL)
+
+on:
+  workflow_call:
+    inputs:
+      languages:
+        description: >-
+          JSON array of CodeQL languages to analyze; each entry becomes a matrix leg. Examples: '["actions"]' or '["python","javascript-typescript"]'.
+          Valid values: actions, c-cpp, csharp, go, java-kotlin, javascript-typescript, python, ruby, rust, swift.
+        type: string
+        required: true
+      runs-on:
+        description: Runner label to run on (an nv-gha-runners label).
+        type: string
+        required: false
+        default: ubuntu-latest
+      build-mode:
+        description: >-
+          CodeQL build mode applied to every matrixed language.
+          none (default) — no toolchain, scans source directly (works for every language; the only mode for interpreted languages).
+          autobuild — best-effort compile for compiled languages.
+          manual is intentionally unsupported here (a reusable workflow cannot carry a repo-specific build) — use a standalone advanced workflow.
+        type: string
+        required: false
+        default: none
+      queries:
+        description: >-
+          CodeQL query suite(s), comma-separated. Prefix with '+' to append to the default suite (e.g. +security-and-quality).
+          Default: security-extended.
+        type: string
+        required: false
+        default: security-extended
+      packs:
+        description: >-
+          Optional CodeQL query packs (comma-separated). Pulling packs from GHCR may require the caller to also grant packages: read.
+        type: string
+        required: false
+        default: ''
+      config-file:
+        description: >-
+          Optional path (in the consuming repo) to a CodeQL config file for path filters, disabled rules, or query-pack selection.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ${{ inputs.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(inputs.languages) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ inputs.build-mode }}
+          queries: ${{ inputs.queries }}
+          packs: ${{ inputs.packs }}
+          config-file: ${{ inputs.config-file }}
+
+      # Runs only when build-mode is autobuild; a no-op for none/other modes.
+      - name: Autobuild
+        if: ${{ inputs.build-mode == 'autobuild' }}
+        uses: github/codeql-action/autobuild@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          category: "/language:${{ matrix.language }}"
