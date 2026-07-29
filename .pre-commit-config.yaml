@@ -3,7 +3,6 @@
 #
 # Pre-commit configuration for NVIDIA/security-workflows.
 # Dogfoods the published `secret-scan-trufflehog` hook from `repo: local`.
-# Requires `trufflehog` on $PATH (see hooks/trufflehog.sh for install).
 
 default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
@@ -23,8 +22,8 @@ repos:
       - id: secret-scan-trufflehog
         name: check for leaked secrets (trufflehog)
         description: verified-leak scan; mirrors .pre-commit-hooks.yaml contract.
-        entry: hooks/trufflehog.sh
-        language: script
+        entry: python hooks/trufflehog.py
+        language: python
         pass_filenames: true
         require_serial: true
         stages: [pre-commit, pre-push]
@@ -50,12 +49,6 @@ repos:
     hooks:
       - id: yamllint
         args: [-c=.yamllint.yaml]
-
-  # Shell script linting for hooks/trufflehog.sh.
-  - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.11.0.1
-    hooks:
-      - id: shellcheck
 
   # GitHub Actions workflow linting — workflows only, not composite actions.
   - repo: https://github.com/rhysd/actionlint

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Secret-scan (pre-commit) — replaced the Bash-based TruffleHog launcher with a Python standard-library implementation. The hook now runs natively on Windows without Git Bash, MSYS, curl, tar, or checksum utilities; pre-commit supplies the required Python runtime.
+
 ## [0.2.0] - 2026-07-24
 
 ### Changed
