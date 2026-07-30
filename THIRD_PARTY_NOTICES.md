@@ -14,7 +14,7 @@ again before distribution.
 
 | Component | Version / Pin | How it is used | License |
 |---|---:|---|---|
-| [TruffleHog](https://github.com/trufflesecurity/trufflehog) | Developer-installed CLI (see [`hooks/trufflehog.sh`](hooks/trufflehog.sh)) | Invoked as a locally installed CLI by the `secret-scan-trufflehog` pre-commit wrapper. Not distributed or vendored by this repository. | [AGPL-3.0](https://github.com/trufflesecurity/trufflehog/blob/main/LICENSE) |
+| [TruffleHog](https://github.com/trufflesecurity/trufflehog) | `v3.95.9` | Built from the pinned upstream source by pre-commit's isolated Go environment for the `secret-scan-trufflehog` hook. Not distributed or vendored by this repository. | [AGPL-3.0](https://github.com/trufflesecurity/trufflehog/blob/main/LICENSE) |
 | [actions/checkout](https://github.com/actions/checkout) | `v6.0.2`, SHA `de0fac2e4500dabe0009e67214ff5f5447ce83dd` | Invoked externally by reusable workflows to check out repository contents. | [MIT](https://github.com/actions/checkout/blob/main/LICENSE) |
 | [hashicorp/vault-action](https://github.com/hashicorp/vault-action) | `v3.4.0`, SHA `4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b` | Fetches short-lived nvcr.io credentials via OIDC → Vault in Pulse scan workflows. | [MPL-2.0](https://github.com/hashicorp/vault-action/blob/main/LICENSE) |
 | [docker/login-action](https://github.com/docker/login-action) | `v4.4.0`, SHA `af1e73f918a031802d376d3c8bbc3fe56130a9b0` | Authenticates to nvcr.io before pulling the Pulse scanner image. | [MIT](https://github.com/docker/login-action/blob/master/LICENSE) |
@@ -23,8 +23,6 @@ again before distribution.
 | [pre-commit](https://github.com/pre-commit/pre-commit) | Developer/consumer installed | Framework that consumes `.pre-commit-hooks.yaml`; not distributed by this repository. | [MIT](https://github.com/pre-commit/pre-commit/blob/main/LICENSE) |
 | [pre-commit-hooks](https://github.com/pre-commit/pre-commit-hooks) | `v5.0.0` | Development-time hygiene hooks in this repository's `.pre-commit-config.yaml`. | [MIT](https://github.com/pre-commit/pre-commit-hooks/blob/main/LICENSE) |
 | [yamllint](https://github.com/adrienverge/yamllint) | `v1.36.2` | Development-time YAML linting hook. | [GPL-3.0-or-later](https://github.com/adrienverge/yamllint/blob/master/LICENSE) |
-| [shellcheck-py](https://github.com/shellcheck-py/shellcheck-py) | `v0.11.0.1` | Development-time pre-commit wrapper for ShellCheck. | [MIT](https://github.com/shellcheck-py/shellcheck-py/blob/main/LICENSE) |
-| [ShellCheck](https://github.com/koalaman/shellcheck) | Provided by `shellcheck-py` | Development-time shell script linting engine. | [GPL-3.0](https://github.com/koalaman/shellcheck/blob/master/LICENSE) |
 | [actionlint](https://github.com/rhysd/actionlint) | `v1.7.7` | Development-time GitHub Actions workflow linting hook. | [MIT](https://github.com/rhysd/actionlint/blob/main/LICENSE.txt) |
 | [codespell](https://github.com/codespell-project/codespell) | `v2.4.1` | Development-time spell-checking hook. | [GPL-2.0-only](https://github.com/codespell-project/codespell/blob/v2.4.1/COPYING); dictionaries are [CC BY-SA 3.0](https://github.com/codespell-project/codespell/blob/v2.4.1/COPYING.Dictionary) |
 

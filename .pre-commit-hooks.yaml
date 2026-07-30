@@ -6,11 +6,13 @@
 - id: secret-scan-trufflehog
   name: check for leaked secrets (trufflehog)
   description: >-
-    Scans changed files for verified secret leaks using TruffleHog. The wrapper
-    downloads a pinned, checksum-verified TruffleHog release into a per-user
-    cache on first use — no manual install required (see hooks/trufflehog.py).
-  entry: python hooks/trufflehog.py
-  language: python       # uses pre-commit's managed Python; no system tools needed
-  pass_filenames: true   # scope scan to changed files
+    Scans uncommitted changes for verified secret leaks using the upstream
+    TruffleHog pre-commit invocation. Pre-commit bootstraps Go and builds the
+    pinned TruffleHog source in its isolated hook environment.
+  entry: trufflehog git file://. --since-commit HEAD --results=verified --fail --trust-local-git-config
+  language: golang
+  additional_dependencies:
+    - github.com/trufflesecurity/trufflehog/v3@v3.95.9
+  pass_filenames: false
   require_serial: true   # one invocation per run
   stages: [pre-commit, pre-push]

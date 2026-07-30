@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Pre-commit configuration for NVIDIA/security-workflows.
-# Dogfoods the published `secret-scan-trufflehog` hook from `repo: local`.
+# Uses TruffleHog's maintained hook while developing this repository.
 
 default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
@@ -13,20 +13,16 @@ ci:
   autoupdate_branch: ""
   autoupdate_commit_msg: "[pre-commit.ci] pre-commit autoupdate"
   autoupdate_schedule: quarterly
-  skip: [secret-scan-trufflehog]  # binary not on pre-commit.ci sandbox
+  skip: [trufflehog]  # source build is not needed on pre-commit.ci
 
 repos:
-  # Dogfood — source locally so uncommitted edits to the wrapper get tested.
-  - repo: local
+  # Use TruffleHog's maintained hook directly while developing this repository.
+  # The published compatibility hook in .pre-commit-hooks.yaml uses the same
+  # command and pinned source version for downstream consumers.
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.95.9
     hooks:
-      - id: secret-scan-trufflehog
-        name: check for leaked secrets (trufflehog)
-        description: verified-leak scan; mirrors .pre-commit-hooks.yaml contract.
-        entry: python hooks/trufflehog.py
-        language: python
-        pass_filenames: true
-        require_serial: true
-        stages: [pre-commit, pre-push]
+      - id: trufflehog
 
   # Universal hygiene — whitespace, line endings, large files, YAML parse.
   - repo: https://github.com/pre-commit/pre-commit-hooks
