@@ -5,9 +5,9 @@
 
 Centrally maintained, reusable GitHub Actions workflows for the security-compliance scans rolled out by the NVIDIA GitHub-First initiative.
 
-This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It publishes two artifact types: **reusable GitHub Actions workflows** (`workflow_call`) under [`.github/workflows/`](.github/workflows/README.md) for job-level server-side enforcement, and **pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for local-advisory checks on the developer's machine. The TruffleHog hook uses pre-commit's managed Go environment to build a pinned upstream source version, so consumers do not install Go, TruffleHog, or platform-specific helper tools. Both surfaces are pinned per the [surface-specific policy below](#pin-policy-per-surface).
+This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It publishes **reusable GitHub Actions workflows** (`workflow_call`) under [`.github/workflows/`](.github/workflows/README.md) for job-level server-side enforcement. For optional local-advisory secret scanning, consumers use [TruffleHog's maintained pre-commit hook](https://github.com/trufflesecurity/trufflehog/blob/v3.95.9/.pre-commit-hooks.yaml) directly. That hook uses pre-commit's managed Go environment to build a pinned upstream source version, so consumers do not install Go, TruffleHog, or platform-specific helper tools. Both references are pinned per the [surface-specific policy below](#pin-policy-per-surface).
 
-Pre-commit and CI are complementary, not alternatives: pre-commit is local-advisory (best-effort, optimized for developer experience) and CI is server-side enforcement (authoritative, fail-closed). The CI surface is a reusable workflow (declared `permissions:`, isolated job) — the preferred shape for security gates. A scan category may ship the CI workflow, the pre-commit hook, or both, depending on whether it fits the <10s local-execution budget.
+Pre-commit and CI are complementary, not alternatives: pre-commit is local-advisory (best-effort, optimized for developer experience) and CI is server-side enforcement (authoritative, fail-closed). The CI surface is a reusable workflow (declared `permissions:`, isolated job) — the preferred shape for security gates. A scan category may ship the CI workflow, the documented upstream pre-commit hook, or both, depending on whether it fits the <10s steady-state local-execution budget.
 
 The repository covers six scan categories:
 
@@ -38,7 +38,7 @@ The six scan categories below are the in-scope surface for this repository. Spec
 
 Detects credentials, API keys, tokens, and other sensitive material introduced in a pull request before they merge. Runs on the diff for performance and on full-repo for periodic baseline sweeps.
 
-The CI surface is `secret-scan-pulse`, which runs NVIDIA's licensed TruffleHog Enterprise (Pulse Secret Scanner) on `nv-gha-runners`. Each run publishes redacted findings to the repository Security tab (maintainers only); raw scanner output is not written to the job log. Local pre-commit checks use `secret-scan-trufflehog`, built on the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) CLI. See the [workflow catalogue](.github/workflows/README.md) for the CI interface and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for the hook.
+The CI surface is `secret-scan-pulse`, which runs NVIDIA's licensed TruffleHog Enterprise (Pulse Secret Scanner) on `nv-gha-runners`. Each run publishes redacted findings to the repository Security tab (maintainers only); raw scanner output is not written to the job log. Local pre-commit checks use the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) project's maintained hook directly. See the [workflow catalogue](.github/workflows/README.md) for the CI interface and [TruffleHog's hook manifest](https://github.com/trufflesecurity/trufflehog/blob/v3.95.9/.pre-commit-hooks.yaml) for the local hook.
 
 ### License scanning
 
@@ -89,22 +89,20 @@ The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md).
 **Pre-commit hook** (in a consumer's `.pre-commit-config.yaml`):
 
 ```yaml
-# Consumers reference this repository, not upstream scanner repos directly —
-# the NVIDIA-approved args live in .pre-commit-hooks.yaml. The TruffleHog hook
-# uses pre-commit's managed Go environment to build the pinned upstream source.
-- repo: https://github.com/NVIDIA/security-workflows
-  rev: v0.1.0                              # release tag — see Pin policy per surface below
+# TruffleHog maintains this hook and its platform-independent Go installation.
+- repo: https://github.com/trufflesecurity/trufflehog
+  rev: v3.95.9                              # pin an upstream release tag
   hooks:
-    - id: secret-scan-trufflehog
+    - id: trufflehog
 ```
 
 ## Getting Started
 
 ### Consumers (downstream NVIDIA repositories)
 
-Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`. The TruffleHog hook uses pre-commit's managed Go environment to build a pinned upstream source version; it therefore works natively on Windows without Git Bash or other developer-installed tools. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
+Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. The optional local TruffleHog scan is consumed directly from the [TruffleHog repository](https://github.com/trufflesecurity/trufflehog) through [pre-commit](https://pre-commit.com/), pinned by upstream release tag in the consumer's `.pre-commit-config.yaml`. It uses pre-commit's managed Go environment to build a pinned upstream source version and therefore works natively on Windows without Git Bash or other developer-installed tools. The one-time source build is materially slower than subsequent scans. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
 
-Per-surface onboarding instructions — runner labels, trigger model, hook arguments, required developer-side tooling, security trade-offs — are documented inline: each workflow file's `workflow_call` definition and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
+Per-surface onboarding instructions — runner labels, trigger model, hook arguments, required developer-side tooling, security trade-offs — are documented inline: each workflow file's `workflow_call` definition and [TruffleHog's hook manifest](https://github.com/trufflesecurity/trufflehog/blob/v3.95.9/.pre-commit-hooks.yaml). Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
 
 The current release status of each scan category lives in [`ROADMAP.md`](ROADMAP.md).
 
@@ -153,8 +151,8 @@ Reference onboarding PRs: [`NVIDIA/cccl#10010`](https://github.com/NVIDIA/cccl/p
 
 **Objective:** This section describes how workflows in this repository are versioned and how consumers should reference them.
 
-- Releases follow [semantic versioning](https://semver.org/) — `MAJOR.MINOR.PATCH` — published as Git tags on this repository. The same release tag covers both surfaces (reusable workflows and pre-commit hooks).
-- A breaking change to a workflow's `workflow_call` interface, or a pre-commit hook's id, arguments, or default policy bumps the **major** version.
+- Releases follow [semantic versioning](https://semver.org/) — `MAJOR.MINOR.PATCH` — published as Git tags on this repository for reusable workflow consumers.
+- A breaking change to a workflow's `workflow_call` interface or default policy bumps the **major** version. Upstream TruffleHog hook updates are pinned and reviewed independently.
 - New optional inputs, additional scan categories, or additional hooks bump the **minor** version.
 - Bug fixes and tightening of internal implementation bump the **patch** version.
 - Tags are immutable — see [`GOVERNANCE.md`](GOVERNANCE.md#release-tagging) for the release-tag policy.
@@ -166,7 +164,7 @@ Consumers must pin every reference. The recommended pin differs by surface becau
 | Where the reference appears | Recommended pin | Rationale |
 |---|---|---|
 | Job-level `uses:` in a consumer workflow (reusable workflow) | 40-character commit SHA | GitHub Actions has no autoupdate mechanism; a force-pushed tag is exploited on the next CI run. |
-| `rev:` in a consumer `.pre-commit-config.yaml` | Release tag (e.g. `v0.1.0`) | `pre-commit autoupdate` is the gated refresh mechanism; tags from this repository are immutable per release policy. |
+| `rev:` in a consumer TruffleHog `.pre-commit-config.yaml` entry | Upstream release tag (e.g. `v3.95.9`) | `pre-commit autoupdate` is the gated refresh mechanism; review and pin an immutable upstream release tag. |
 
 Branch references (`@main`, `@latest`) are not acceptable on any surface — they defeat reproducibility and supply-chain controls.
 
@@ -184,7 +182,7 @@ The deprecation window will depend on the impact of the change but will usually 
 
 ## Related Projects
 
-- [`pre-commit`](https://pre-commit.com/) — Upstream framework that consumes the `.pre-commit-hooks.yaml` manifest in this repository. The [Installation](https://pre-commit.com/#install) and [Usage](https://pre-commit.com/#usage) sections cover `pre-commit install`, `pre-commit run`, and `pre-commit autoupdate` — the commands consumers will use to install and refresh the hooks defined here.
+- [`pre-commit`](https://pre-commit.com/) — Framework used by the upstream [TruffleHog hook](https://github.com/trufflesecurity/trufflehog/blob/v3.95.9/.pre-commit-hooks.yaml). The [Installation](https://pre-commit.com/#install) and [Usage](https://pre-commit.com/#usage) sections cover `pre-commit install`, `pre-commit run`, and `pre-commit autoupdate`.
 - [`NVIDIA-GitHub-Management/PLC-OSS-Template`](https://github.com/NVIDIA-GitHub-Management/PLC-OSS-Template) — NVIDIA OSS repository template.
 
 ## Repositories Using These Workflows

@@ -8,7 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Secret-scan (pre-commit) — replaced the Bash-based launcher with pre-commit's managed Go installation of the pinned upstream TruffleHog source (`v3.95.9`). The hook now runs natively on Windows without Git Bash, MSYS, curl, tar, or a manually installed Go toolchain.
+- Secret-scan (pre-commit) — consumers now use [TruffleHog's maintained hook](https://github.com/trufflesecurity/trufflehog/blob/v3.95.9/.pre-commit-hooks.yaml) directly at `v3.95.9`. Pre-commit manages the Go toolchain and source build, so the hook runs natively on Windows without Git Bash, MSYS, curl, tar, or a manually installed Go toolchain.
+
+### Removed
+
+- Secret-scan (pre-commit) — removed the `secret-scan-trufflehog` wrapper hook. Consumers must migrate to the upstream `trufflehog` hook; this is a breaking public-interface change.
 
 ## [0.2.0] - 2026-07-24
 

@@ -17,8 +17,6 @@ ci:
 
 repos:
   # Use TruffleHog's maintained hook directly while developing this repository.
-  # The published compatibility hook in .pre-commit-hooks.yaml uses the same
-  # command and pinned source version for downstream consumers.
   - repo: https://github.com/trufflesecurity/trufflehog
     rev: v3.95.9
     hooks:

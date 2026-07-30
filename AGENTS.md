@@ -6,14 +6,14 @@ Guidelines for agents (and humans) working in the NVIDIA Security Workflows repo
 
 ## Overview
 
-This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. It exposes **two surfaces**:
+This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. Its primary published surface is reusable GitHub Actions workflows; it also documents the upstream TruffleHog hook for optional local-advisory secret scanning.
 
 - **Reusable GitHub Actions workflows** under `.github/workflows/` — job-level server-side enforcement via [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows). Each workflow declares its own `permissions:` block and runs in an isolated job. This is the CI enforcement surface for security gates per guardrail #4 (least-privilege).
-- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. The TruffleHog hook uses pre-commit's managed Go environment to build a pinned upstream source version, so consumers do not install Go or the scanner themselves.
+- **Local TruffleHog scan** — consumers reference [TruffleHog's maintained pre-commit hook](https://github.com/trufflesecurity/trufflehog/blob/v3.95.9/.pre-commit-hooks.yaml) directly. Pre-commit supplies Go and builds the pinned upstream source in an isolated environment, so consumers do not install Go or the scanner themselves.
 
-Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
+Consumer repositories reference the CI workflow by 40-character commit SHA and the upstream TruffleHog hook by release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
 
-The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the local-advisory pre-commit hook [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) (open-source `trufflesecurity/trufflehog`). Pulse is container-only, so it is CI-only; the pre-commit lane deliberately uses the OSS CLI to stay within the <10s DX budget after its one-time managed installation.
+The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the optional local-advisory upstream [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) pre-commit hook. Pulse is container-only, so it is CI-only; the local hook stays within the <10s DX budget after its one-time managed installation.
 
 ---
 
@@ -32,13 +32,13 @@ Before any non-trivial change, read:
 
 ## Workflow Development Guardrails
 
-Everything published from this repository — `workflow_call` workflows and `.pre-commit-hooks.yaml` hooks — has org-wide reach through pinned references in downstream repositories (SHA for the CI workflow, release tag for pre-commit). These constraints keep that blast radius contained.
+Everything published from this repository — especially `workflow_call` workflows — has org-wide reach through pinned references in downstream repositories. The documented TruffleHog integration is also security-sensitive because it establishes the local scan policy.
 
-1. **`workflow_call` interfaces and `.pre-commit-hooks.yaml` hook ids are public contracts.** Renaming or removing a workflow input, renaming or removing a hook id, changing hook arguments, or changing a default that affects security posture is a **major** version bump per [`README.md`](README.md#versioning).
+1. **`workflow_call` interfaces are public contracts.** Renaming or removing a workflow input, or changing a default that affects security posture, is a **major** version bump per [`README.md`](README.md#versioning). Changes to the documented TruffleHog version or arguments require the same level of security review.
 2. **Default to fail-closed.** A scan finding blocks the consumer's merge (workflows) or commit (pre-commit hooks). Fail-open behavior must be an explicit, opt-in input — never the default.
 3. **Pin every external reference per surface** — full table in [`README.md`](README.md#pin-policy-per-surface):
    - `uses:` in a workflow → **40-character commit SHA**
-   - `rev:` in a consumer's `.pre-commit-config.yaml` → **release tag** (e.g. `v0.1.0`)
+   - `rev:` in a consumer's TruffleHog `.pre-commit-config.yaml` entry → **upstream release tag** (e.g. `v3.95.9`)
 
    Branch references (`@main`, `@latest`) are never acceptable.
 4. **Least-privilege `permissions:`.** Default the workflow root to read-only; escalate per-job only where required (e.g. `security-events: write` for SARIF upload).
