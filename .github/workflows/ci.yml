@@ -5,7 +5,7 @@
 # workflows are `workflow_call` and never self-trigger, so this workflow is
 # what exercises them:
 #   - lint:      validates every workflow/configuration file (pre-commit stack).
-#   - hook smoke: installs the packaged TruffleHog hook on every supported OS family.
+#   - hook smoke: installs the packaged TruffleHog hook on every supported OS/architecture.
 #   - integration (Pulse): tests all three failure_policy scenarios with positive and negative cases.
 
 name: CI (lint + scan self-tests)
@@ -45,12 +45,43 @@ jobs:
         run: python -m unittest discover --start-directory hooks/trufflehog/tests --verbose
 
   trufflehog-hook-smoke:
-    name: TruffleHog hook (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: TruffleHog hook (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Pin labels with known architectures rather than relying on `-latest`.
+        include:
+          - target: Linux x86_64
+            runner: ubuntu-24.04
+            sys_platform: linux
+            machine: x86_64
+            python_architecture: x64
+          - target: Linux ARM64
+            runner: ubuntu-24.04-arm
+            sys_platform: linux
+            machine: aarch64
+            python_architecture: arm64
+          - target: macOS x86_64
+            runner: macos-26-intel
+            sys_platform: darwin
+            machine: x86_64
+            python_architecture: x64
+          - target: macOS ARM64
+            runner: macos-26
+            sys_platform: darwin
+            machine: arm64
+            python_architecture: arm64
+          - target: Windows x86_64
+            runner: windows-2022
+            sys_platform: win32
+            machine: AMD64
+            python_architecture: x64
+          - target: Windows ARM64
+            runner: windows-11-arm
+            sys_platform: win32
+            machine: ARM64
+            python_architecture: arm64
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -58,6 +89,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: '3.x'
+          architecture: ${{ matrix.python_architecture }}
+      - name: Verify the runner selects the expected archive
+        env:
+          EXPECTED_SYS_PLATFORM: ${{ matrix.sys_platform }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: >-
+          python -c "import os, platform, sys; actual = (sys.platform, platform.machine()); expected = (os.environ['EXPECTED_SYS_PLATFORM'], os.environ['EXPECTED_MACHINE']); print(f'actual={actual}, expected={expected}'); sys.exit(actual != expected)"
       - name: Install pre-commit
         run: |
           python -m pip install --upgrade pip

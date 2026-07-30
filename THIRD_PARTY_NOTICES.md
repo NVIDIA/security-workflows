@@ -25,7 +25,7 @@ again before distribution.
 | [pre-commit](https://github.com/pre-commit/pre-commit) | Developer/consumer installed | Framework that creates and owns the `secret-scan-trufflehog` environment; `pre-commit clean` removes its downloaded executable. | [MIT](https://github.com/pre-commit/pre-commit/blob/main/LICENSE) |
 | [pre-commit-hooks](https://github.com/pre-commit/pre-commit-hooks) | `v5.0.0` | Development-time hygiene hooks in this repository's `.pre-commit-config.yaml`. | [MIT](https://github.com/pre-commit/pre-commit-hooks/blob/main/LICENSE) |
 | [yamllint](https://github.com/adrienverge/yamllint) | `v1.36.2` | Development-time YAML linting hook. | [GPL-3.0-or-later](https://github.com/adrienverge/yamllint/blob/master/LICENSE) |
-| [actionlint](https://github.com/rhysd/actionlint) | `v1.7.7` | Development-time GitHub Actions workflow linting hook. | [MIT](https://github.com/rhysd/actionlint/blob/main/LICENSE.txt) |
+| [actionlint](https://github.com/rhysd/actionlint) | `v1.7.12` | Development-time GitHub Actions workflow linting hook. | [MIT](https://github.com/rhysd/actionlint/blob/main/LICENSE.txt) |
 | [codespell](https://github.com/codespell-project/codespell) | `v2.4.1` | Development-time spell-checking hook. | [GPL-2.0-only](https://github.com/codespell-project/codespell/blob/v2.4.1/COPYING); dictionaries are [CC BY-SA 3.0](https://github.com/codespell-project/codespell/blob/v2.4.1/COPYING.Dictionary) |
 
 ## Included Third-Party Text
