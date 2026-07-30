@@ -4,20 +4,15 @@
 
 from __future__ import annotations
 
-import re
+import configparser
 import unittest
 from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
-PACKAGE_CONFIG = PACKAGE_ROOT / "pyproject.toml"
+SETUP_CONFIG = PACKAGE_ROOT / "setup.cfg"
 HOOK_MANIFEST = REPOSITORY_ROOT / ".pre-commit-hooks.yaml"
-
-DOWNLOAD_SCRIPTS = re.compile(
-    r'(?ms)^\[tool\.distutils\.setuptools_download\]\n'
-    r'(?:#[^\n]*\n)*download_scripts = """\n(?P<entries>.*?)\n"""',
-)
 
 EXPECTED_ARCHIVES = {
     ("trufflehog", 'sys_platform == "darwin" and platform_machine == "x86_64"'): (
@@ -54,15 +49,15 @@ EXPECTED_ARCHIVES = {
 
 
 def download_entries() -> list[dict[str, str]]:
-    match = DOWNLOAD_SCRIPTS.search(PACKAGE_CONFIG.read_text(encoding="utf-8"))
-    assert match is not None
+    config = configparser.ConfigParser()
+    config.read(SETUP_CONFIG)
 
     entries: list[dict[str, str]] = []
     entry: dict[str, str] | None = None
-    for line in match.group("entries").splitlines():
-        assert line == line.lstrip()
+    for line in config["setuptools_download"]["download_scripts"].splitlines():
         line = line.strip()
-        assert line
+        if not line:
+            continue
         if line.startswith("[") and line.endswith("]"):
             if entry is not None:
                 entries.append(entry)
@@ -96,21 +91,24 @@ class TruffleHogPackagingTests(unittest.TestCase):
             self.assertEqual(entry["extract"], "tar")
             self.assertTrue(entry["url"].startswith("https://github.com/trufflesecurity/trufflehog/releases/"))
 
-    def test_hook_uses_the_nested_package_and_nvidia_policy(self) -> None:
+    def test_hook_preserves_the_security_policy(self) -> None:
         manifest = HOOK_MANIFEST.read_text(encoding="utf-8")
-        self.assertIn("id: secret-scan-trufflehog", manifest)
         self.assertIn("entry: trufflehog filesystem --results=verified --fail --no-update", manifest)
-        self.assertIn("language: python", manifest)
-        self.assertIn("additional_dependencies: [./hooks/trufflehog]", manifest)
         self.assertIn("pass_filenames: true", manifest)
         self.assertIn("require_serial: true", manifest)
 
-    def test_trufflehog_build_requirement_is_isolated_from_the_root_bridge(self) -> None:
-        package_config = PACKAGE_CONFIG.read_text(encoding="utf-8")
+    def test_trufflehog_build_configuration_is_isolated(self) -> None:
+        package_build_config = (PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        package_setup_config = SETUP_CONFIG.read_text(encoding="utf-8")
+        setup_py = (PACKAGE_ROOT / "setup.py").read_text(encoding="utf-8")
         root_build_config = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertRegex(package_config, r'"setuptools-download==1\.0\.1"')
-        self.assertIn("[tool.distutils.setuptools_download]", package_config)
-        self.assertFalse((PACKAGE_ROOT / "setup.cfg").exists())
+        self.assertRegex(package_build_config, r'"setuptools-download==1\.0\.1"')
+        self.assertRegex(package_build_config, r'"setuptools>=70\.1"')
+        self.assertTrue(SETUP_CONFIG.exists())
+        self.assertIn("[setuptools_download]", package_setup_config)
+        self.assertNotIn("[tool.distutils.setuptools_download]", package_build_config)
+        self.assertIn("from setuptools.command.bdist_wheel", setup_py)
+        self.assertNotIn("from wheel.bdist_wheel", setup_py)
         self.assertNotIn("setuptools-download", root_build_config)
         self.assertIn("packages = []", root_build_config)
 

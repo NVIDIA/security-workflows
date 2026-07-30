@@ -3,7 +3,7 @@
 """Mark the locally built TruffleHog wheel as platform-specific."""
 
 from setuptools import setup
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 class bdist_wheel(_bdist_wheel):
