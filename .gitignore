@@ -24,5 +24,4 @@ Thumbs.db
 /hooks/trufflehog/build/
 /hooks/trufflehog/dist/
 /hooks/trufflehog/*.egg-info/
-/hooks/trufflehog/tests/__pycache__/
 /nvidia_security_workflows_pre_commit_bridge.egg-info/
