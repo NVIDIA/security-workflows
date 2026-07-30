@@ -6,8 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- SAST (CodeQL) reusable workflow — [`.github/workflows/sast-scan-codeql.yml`](.github/workflows/sast-scan-codeql.yml). Generic, matrix-driven CodeQL analysis (`languages`, `build-mode`, `queries`, `packs`, `config-file`, `runs-on` inputs) with the `github/codeql-action` steps pinned by SHA. Positioned as the **customization-tier** lever — the fleet baseline for CodeQL is GitHub Default setup via org/enterprise Security Configurations. See [`.github/workflows/README.md`](.github/workflows/README.md#sast-codeql) for prerequisites (GHAS/code scanning, Default-setup conflict) and usage.
+
 ### Changed
 
+- Secret-scan (Pulse) — the reusable workflow no longer uploads SARIF on CI self-test runs (`ci_test_setup: true`), so the disposable RSA fixture no longer publishes a code-scanning alert to the default-branch Security tab. Real consumer scans are unaffected.
 - Secret-scan (pre-commit) — `secret-scan-trufflehog` now installs the SHA-256-pinned TruffleHog release in pre-commit's isolated Python environment rather than the per-user cache.
 
 ## [0.2.0] - 2026-07-24

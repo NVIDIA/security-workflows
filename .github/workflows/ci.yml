@@ -245,3 +245,19 @@ jobs:
     with:
       failure_policy: all
       ci_test_setup: true
+
+  # ============================================================================
+  # SAST (CodeQL) — self test the reusable workflow on this repo's own sources.
+  # This repo is workflows + shell, so the relevant CodeQL language is "actions".
+  # Alerts-first: analyze uploads to code scanning; it does not fail on findings.
+  # ============================================================================
+  sast-codeql-dogfood:
+    name: SAST (CodeQL) — self test
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/sast-scan-codeql.yml
+    with:
+      languages: '["actions"]'
+      runs-on: ubuntu-latest
