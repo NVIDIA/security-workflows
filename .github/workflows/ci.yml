@@ -42,7 +42,7 @@ jobs:
           pre-commit run --all-files --show-diff-on-failure
 
       - name: Test TruffleHog hook packaging metadata
-        run: python -m unittest discover --start-directory tests --verbose
+        run: python -m unittest discover --start-directory hooks/trufflehog/tests --verbose
 
   trufflehog-hook-smoke:
     name: TruffleHog hook (${{ matrix.os }})

@@ -9,7 +9,7 @@ Guidelines for agents (and humans) working in the NVIDIA Security Workflows repo
 This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. It exposes two published surfaces.
 
 - **Reusable GitHub Actions workflows** under `.github/workflows/` — job-level server-side enforcement via [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows). Each workflow declares its own `permissions:` block and runs in an isolated job. This is the CI enforcement surface for security gates per guardrail #4 (least-privilege).
-- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and the package metadata in [`pyproject.toml`](pyproject.toml) / [`setup.cfg`](setup.cfg) to download an official TruffleHog release into pre-commit's isolated `py_env` (`bin` on POSIX, `Scripts` on Windows). Consumers need no system TruffleHog, Go, Git Bash, curl, or tar.
+- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and its self-contained package metadata under [`hooks/trufflehog/`](hooks/trufflehog) to download an official TruffleHog release into pre-commit's isolated `py_env` (`bin` on POSIX, `Scripts` on Windows). A metadata-only root bridge exists because pre-commit installs every Python hook repository root before its hook-specific dependencies. Consumers need no system TruffleHog or shell-based installer tooling.
 
 Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by NVIDIA Security Workflows release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
 
@@ -45,7 +45,7 @@ Everything published from this repository — especially `workflow_call` workflo
 5. **No secrets in this repository.** Workflows may *consume* caller-supplied secrets via `secrets:` inputs, but no tokens, certificates, or `.env` files are ever committed here. If a change appears to require a committed secret, stop and ask.
 6. **Audit-log output is part of the contract.** Each workflow is expected to emit a structured run record; changing its shape is at least a minor version bump. The shared schema is tracked in [`ROADMAP.md`](ROADMAP.md).
 7. **Pre-commit hooks must respect the <10s DX budget.** Scans that cannot fit (malware verdict service, full SCA, full SAST) ship as workflows only — they are explicitly out of scope for the pre-commit surface. The one-time TruffleHog archive download is excluded from steady-state execution.
-8. **Update archive pins as one reviewed unit.** When changing TruffleHog, update the version, every supported platform archive URL, and every SHA-256 in [`setup.cfg`](setup.cfg), then update the matching tests and third-party notice. No scanner archive or binary may be committed or published from this repository.
+8. **Update archive pins as one reviewed unit.** When changing TruffleHog, update the version, every supported platform archive URL, and every SHA-256 in [`hooks/trufflehog/setup.cfg`](hooks/trufflehog/setup.cfg), then update the matching tests and third-party notice. No scanner archive or binary may be committed or published from this repository.
 
 Changes that fall outside these guardrails require ProdSec acknowledgment per [`GOVERNANCE.md`](GOVERNANCE.md).
 
@@ -70,7 +70,7 @@ Run `pre-commit run --all-files` before committing.
 For changes to `secret-scan-trufflehog`, also run:
 
 ```bash
-python -m unittest discover --start-directory tests --verbose
+python -m unittest discover --start-directory hooks/trufflehog/tests --verbose
 PRE_COMMIT_HOME="$(mktemp -d)" pre-commit try-repo . secret-scan-trufflehog --files README.md
 ```
 

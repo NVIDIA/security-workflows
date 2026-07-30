@@ -11,7 +11,7 @@ Job-level surface (`workflow_call`). Reusable workflows declare their own `permi
 The secret scan also ships a local-advisory **pre-commit hook** (`secret-scan-trufflehog`, built on open-source
 [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog)) declared in
 [`.pre-commit-hooks.yaml`](../../.pre-commit-hooks.yaml). Its package metadata downloads a SHA-256-pinned official
-release into pre-commit's isolated environment; it does not require a system scanner or Go build. Pre-commit is
+release into pre-commit's isolated environment; it does not require a system scanner or shell-based installer tooling. Pre-commit is
 developer-machine advisory, while this workflow is CI enforcement. Inputs, defaults, and required permissions are
 documented inline in each workflow's `workflow_call` block. Scan-category status is in [`ROADMAP.md`](../../ROADMAP.md).
 

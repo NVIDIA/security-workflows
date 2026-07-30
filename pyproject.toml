@@ -2,9 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build-system]
-requires = [
-    "setuptools>=46.1.0",
-    "setuptools-download==1.0.1",
-    "wheel>=0.37.1",
-]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+# `language: python` always installs the hook repository root. Keep this
+# bridge empty; the TruffleHog-specific package is an additional dependency
+# declared by .pre-commit-hooks.yaml.
+[project]
+name = "nvidia-security-workflows-pre-commit-bridge"
+version = "0"
+
+[tool.setuptools]
+packages = []

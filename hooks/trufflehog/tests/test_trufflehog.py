@@ -9,9 +9,10 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).parents[1]
-SETUP_CONFIG = ROOT / "setup.cfg"
-HOOK_MANIFEST = ROOT / ".pre-commit-hooks.yaml"
+PACKAGE_ROOT = Path(__file__).parents[1]
+REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
+SETUP_CONFIG = PACKAGE_ROOT / "setup.cfg"
+HOOK_MANIFEST = REPOSITORY_ROOT / ".pre-commit-hooks.yaml"
 
 EXPECTED_ARCHIVES = {
     ("trufflehog", 'sys_platform == "darwin" and platform_machine == "x86_64"'): (
@@ -89,17 +90,21 @@ class TruffleHogPackagingTests(unittest.TestCase):
             self.assertEqual(entry["extract"], "tar")
             self.assertTrue(entry["url"].startswith("https://github.com/trufflesecurity/trufflehog/releases/"))
 
-    def test_hook_uses_the_env_managed_binary_and_nvidia_policy(self) -> None:
+    def test_hook_uses_the_nested_package_and_nvidia_policy(self) -> None:
         manifest = HOOK_MANIFEST.read_text(encoding="utf-8")
         self.assertIn("id: secret-scan-trufflehog", manifest)
         self.assertIn("entry: trufflehog filesystem --results=verified --fail --no-update", manifest)
         self.assertIn("language: python", manifest)
+        self.assertIn("additional_dependencies: [./hooks/trufflehog]", manifest)
         self.assertIn("pass_filenames: true", manifest)
         self.assertIn("require_serial: true", manifest)
 
-    def test_build_requirement_is_pinned(self) -> None:
-        build_config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    def test_trufflehog_build_requirement_is_isolated_from_the_root_bridge(self) -> None:
+        build_config = (PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        root_build_config = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertRegex(build_config, r'"setuptools-download==1\.0\.1"')
+        self.assertNotIn("setuptools-download", root_build_config)
+        self.assertIn("packages = []", root_build_config)
 
 
 if __name__ == "__main__":

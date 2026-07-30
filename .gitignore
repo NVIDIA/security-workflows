@@ -13,15 +13,16 @@ Thumbs.db
 # Editor scratch
 *.swp
 *.swo
-__pycache__/
 .vscode/
 .idea/
 
 # Pre-commit local cache
 .pre-commit-cache/
 
-# Local hook-package build artifacts. The TruffleHog executable is downloaded
-# only into a pre-commit environment and must never be committed.
-/build/
-/dist/
-/*.egg-info/
+# TruffleHog hook-package build artifacts. The executable is downloaded only
+# into a pre-commit environment and must never be committed.
+/hooks/trufflehog/build/
+/hooks/trufflehog/dist/
+/hooks/trufflehog/*.egg-info/
+/hooks/trufflehog/tests/__pycache__/
+/nvidia_security_workflows_pre_commit_bridge.egg-info/

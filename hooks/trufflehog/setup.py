@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Mark the locally built hook wheel as platform-specific."""
+"""Mark the locally built TruffleHog wheel as platform-specific."""
 
 from setuptools import setup
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel

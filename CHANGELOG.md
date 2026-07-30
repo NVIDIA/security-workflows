@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Secret-scan (pre-commit) — retained the `secret-scan-trufflehog` public hook and moved its TruffleHog `v3.95.9` installation from an external user cache to pre-commit's isolated Python environment. The pinned `setuptools-download` build helper downloads the official platform release, verifies its SHA-256, and installs `trufflehog` in that environment's `bin` / `Scripts` directory. This works natively on Windows without Go, Git Bash, curl, tar, or a system-installed scanner; `pre-commit clean` removes the environment and binary.
+- Secret-scan (pre-commit) — `secret-scan-trufflehog` now installs the existing pinned TruffleHog `v3.95.9` release into pre-commit's isolated Python environment rather than the per-user cache. The hook-specific `setuptools-download` package verifies the archive SHA-256 and installs `trufflehog` in that environment's `bin` / `Scripts` directory. This works natively on Windows without Git Bash, curl, tar, or a system-installed scanner; `pre-commit clean` removes the environment and binary.
 
 ## [0.2.0] - 2026-07-24
 
