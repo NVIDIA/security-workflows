@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Pre-commit configuration for NVIDIA/security-workflows.
-# Uses TruffleHog's maintained hook while developing this repository.
+# The published TruffleHog hook is tested with `pre-commit try-repo` in CI so
+# its build-time binary download stays out of the general lint path.
 
 default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
@@ -13,15 +14,8 @@ ci:
   autoupdate_branch: ""
   autoupdate_commit_msg: "[pre-commit.ci] pre-commit autoupdate"
   autoupdate_schedule: quarterly
-  skip: [trufflehog]  # source build is not needed on pre-commit.ci
 
 repos:
-  # Use TruffleHog's maintained hook directly while developing this repository.
-  - repo: https://github.com/trufflesecurity/trufflehog
-    rev: v3.95.9
-    hooks:
-      - id: trufflehog
-
   # Universal hygiene — whitespace, line endings, large files, YAML parse.
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
