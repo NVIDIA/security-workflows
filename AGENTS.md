@@ -6,14 +6,14 @@ Guidelines for agents (and humans) working in the NVIDIA Security Workflows repo
 
 ## Overview
 
-This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. It exposes two published surfaces.
+This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. It exposes **two surfaces**:
 
 - **Reusable GitHub Actions workflows** under `.github/workflows/` — job-level server-side enforcement via [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows). Each workflow declares its own `permissions:` block and runs in an isolated job. This is the CI enforcement surface for security gates per guardrail #4 (least-privilege).
-- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and its self-contained package metadata under [`hooks/trufflehog/`](hooks/trufflehog) to download an official TruffleHog release into pre-commit's isolated `py_env` (`bin` on POSIX, `Scripts` on Windows). A metadata-only root bridge exists because pre-commit installs every Python hook repository root before its hook-specific dependencies. Consumers need no system TruffleHog or shell-based installer tooling.
+- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and downloads the pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment; consumers need no system scanner or shell installer.
 
-Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by NVIDIA Security Workflows release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
+Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
 
-The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the optional local-advisory [`secret-scan-trufflehog`](.pre-commit-hooks.yaml) hook (open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog)). Pulse is container-only, so it is CI-only; the local hook stays within the <10s DX budget after its one-time managed binary installation.
+The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the local-advisory pre-commit hook [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) (open-source `trufflesecurity/trufflehog`, installed into pre-commit's isolated environment). Pulse is container-only, so it is CI-only; the pre-commit lane deliberately uses the OSS CLI to stay within the <10s DX budget on developer machines.
 
 ---
 
@@ -32,20 +32,20 @@ Before any non-trivial change, read:
 
 ## Workflow Development Guardrails
 
-Everything published from this repository — especially `workflow_call` workflows and `.pre-commit-hooks.yaml` hook ids — has org-wide reach through pinned references in downstream repositories. The TruffleHog integration is also security-sensitive because it establishes the local scan policy.
+Everything published from this repository — `workflow_call` workflows and `.pre-commit-hooks.yaml` hooks — has org-wide reach through pinned references in downstream repositories (SHA for the CI workflow, release tag for pre-commit). These constraints keep that blast radius contained.
 
-1. **`workflow_call` interfaces and `.pre-commit-hooks.yaml` hook ids are public contracts.** Renaming or removing a workflow input or hook id, changing hook arguments, or changing a default that affects security posture is a **major** version bump per [`README.md`](README.md#versioning). TruffleHog version and checksum updates require the same level of security review.
+1. **`workflow_call` interfaces and `.pre-commit-hooks.yaml` hook ids are public contracts.** Renaming or removing a workflow input, renaming or removing a hook id, changing hook arguments, or changing a default that affects security posture is a **major** version bump per [`README.md`](README.md#versioning).
 2. **Default to fail-closed.** A scan finding blocks the consumer's merge (workflows) or commit (pre-commit hooks). Fail-open behavior must be an explicit, opt-in input — never the default.
 3. **Pin every external reference per surface** — full table in [`README.md`](README.md#pin-policy-per-surface):
    - `uses:` in a workflow → **40-character commit SHA**
-   - `rev:` in a consumer's `.pre-commit-config.yaml` entry → **NVIDIA Security Workflows release tag** (e.g. `v0.2.0`)
+   - `rev:` in a consumer's `.pre-commit-config.yaml` → **release tag** (e.g. `v0.1.0`)
 
    Branch references (`@main`, `@latest`) are never acceptable.
 4. **Least-privilege `permissions:`.** Default the workflow root to read-only; escalate per-job only where required (e.g. `security-events: write` for SARIF upload).
 5. **No secrets in this repository.** Workflows may *consume* caller-supplied secrets via `secrets:` inputs, but no tokens, certificates, or `.env` files are ever committed here. If a change appears to require a committed secret, stop and ask.
 6. **Audit-log output is part of the contract.** Each workflow is expected to emit a structured run record; changing its shape is at least a minor version bump. The shared schema is tracked in [`ROADMAP.md`](ROADMAP.md).
-7. **Pre-commit hooks must respect the <10s DX budget.** Scans that cannot fit (malware verdict service, full SCA, full SAST) ship as workflows only — they are explicitly out of scope for the pre-commit surface. The one-time TruffleHog archive download is excluded from steady-state execution.
-8. **Update archive pins as one reviewed unit.** When changing TruffleHog, update the version, every supported platform archive URL, and every SHA-256 in [`hooks/trufflehog/setup.cfg`](hooks/trufflehog/setup.cfg), then update the matching tests and third-party notice. No scanner archive or binary may be committed or published from this repository.
+7. **Pre-commit hooks must respect the <10s DX budget.** Scans that cannot fit (malware verdict service, full SCA, full SAST) ship as workflows only — they are explicitly out of scope for the pre-commit surface.
+8. **Update archive pins as one reviewed unit.** When changing TruffleHog, update the version, every supported platform archive URL, and every SHA-256 in [`hooks/trufflehog/pyproject.toml`](hooks/trufflehog/pyproject.toml), then update the matching tests and third-party notice. No scanner archive or binary may be committed or published from this repository.
 
 Changes that fall outside these guardrails require ProdSec acknowledgment per [`GOVERNANCE.md`](GOVERNANCE.md).
 
@@ -53,7 +53,7 @@ Changes that fall outside these guardrails require ProdSec acknowledgment per [`
 
 ## Validating Changes
 
-This repository contains only workflow/configuration code plus minimal package metadata for the managed hook.
+This repository contains no application code; validation is YAML- and Actions-focused.
 
 ```bash
 # Syntactic YAML check across all tracked YAML files
@@ -80,7 +80,7 @@ The smoke test downloads a release archive; remove the temporary pre-commit dire
 
 ## Out of Scope
 
-- Application source code or libraries — other than the minimal packaging metadata needed for pre-commit hook installation.
+- Application source code or libraries — this is a workflow-only repository, apart from the minimal packaging metadata needed for pre-commit hook installation.
 - Per-repository configuration for downstream consumers — lives in each consumer repo, not here.
 
 ---

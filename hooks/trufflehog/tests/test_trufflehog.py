@@ -4,15 +4,20 @@
 
 from __future__ import annotations
 
-import configparser
+import re
 import unittest
 from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
-SETUP_CONFIG = PACKAGE_ROOT / "setup.cfg"
+PACKAGE_CONFIG = PACKAGE_ROOT / "pyproject.toml"
 HOOK_MANIFEST = REPOSITORY_ROOT / ".pre-commit-hooks.yaml"
+
+DOWNLOAD_SCRIPTS = re.compile(
+    r'(?ms)^\[tool\.distutils\.setuptools_download\]\n'
+    r'(?:#[^\n]*\n)*download_scripts = """\n(?P<entries>.*?)\n"""',
+)
 
 EXPECTED_ARCHIVES = {
     ("trufflehog", 'sys_platform == "darwin" and platform_machine == "x86_64"'): (
@@ -49,14 +54,15 @@ EXPECTED_ARCHIVES = {
 
 
 def download_entries() -> list[dict[str, str]]:
-    config = configparser.ConfigParser()
-    config.read(SETUP_CONFIG)
+    match = DOWNLOAD_SCRIPTS.search(PACKAGE_CONFIG.read_text(encoding="utf-8"))
+    assert match is not None
+
     entries: list[dict[str, str]] = []
     entry: dict[str, str] | None = None
-    for line in config["setuptools_download"]["download_scripts"].splitlines():
+    for line in match.group("entries").splitlines():
+        assert line == line.lstrip()
         line = line.strip()
-        if not line:
-            continue
+        assert line
         if line.startswith("[") and line.endswith("]"):
             if entry is not None:
                 entries.append(entry)
@@ -100,9 +106,11 @@ class TruffleHogPackagingTests(unittest.TestCase):
         self.assertIn("require_serial: true", manifest)
 
     def test_trufflehog_build_requirement_is_isolated_from_the_root_bridge(self) -> None:
-        build_config = (PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        package_config = PACKAGE_CONFIG.read_text(encoding="utf-8")
         root_build_config = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertRegex(build_config, r'"setuptools-download==1\.0\.1"')
+        self.assertRegex(package_config, r'"setuptools-download==1\.0\.1"')
+        self.assertIn("[tool.distutils.setuptools_download]", package_config)
+        self.assertFalse((PACKAGE_ROOT / "setup.cfg").exists())
         self.assertNotIn("setuptools-download", root_build_config)
         self.assertIn("packages = []", root_build_config)
 

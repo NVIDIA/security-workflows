@@ -14,7 +14,7 @@
 
 | Scan | Reusable workflow status | Pre-commit hook status | Notes |
 |---|---|---|---|
-| Secret scanning | Pilot (v0.1.0) — [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) | Pilot — [`secret-scan-trufflehog`](.pre-commit-hooks.yaml), TruffleHog `v3.95.9` | Pulse is the CI enforcement lane (runs the Pulse image on `nv-gha-runners`); the managed OSS hook is the optional local-advisory lane. It installs a pinned prebuilt binary in the isolated pre-commit environment. |
+| Secret scanning | Pilot (v0.1.0) — [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) | Pilot (v0.1.0) — `secret-scan-trufflehog` published in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) | Pulse is the CI enforcement lane (runs the Pulse image on `nv-gha-runners`); OSS TruffleHog is the local pre-commit advisory lane. |
 | License scanning | Planned | Planned | — |
 | Vulnerability scanning | Planned | Out of scope (>10s DX budget) | CI workflow only |
 | Malware scanning | Planned | Out of scope (off-runner verdict service) | CI workflow only |
