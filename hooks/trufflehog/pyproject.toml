@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build-system]
+# setuptools-download 1.0.1 has a legacy license classifier that Setuptools
+# 77+ warns about; the smoke test treats Python warnings as errors.
 requires = [
-    "setuptools>=70.1",
+    "setuptools>=70.1,<77",
     "setuptools-download==1.0.1",
 ]
 build-backend = "setuptools.build_meta"

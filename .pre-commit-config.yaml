@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Pre-commit configuration for NVIDIA/security-workflows.
-# The published TruffleHog hook is tested with `pre-commit try-repo` in CI so
-# its build-time binary download stays out of the general lint path.
+# Published hooks are smoke-tested through CI with `pre-commit try-repo`
+# against `.pre-commit-hooks.yaml`.
 
 default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]

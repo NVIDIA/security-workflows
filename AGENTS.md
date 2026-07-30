@@ -67,10 +67,10 @@ actionlint
 
 Run `pre-commit run --all-files` before committing.
 
-For changes to `secret-scan-trufflehog`, also run:
+For changes to published pre-commit hooks, also run:
 
 ```bash
-PRE_COMMIT_HOME="$(mktemp -d)" pre-commit try-repo . secret-scan-trufflehog --files README.md
+PRE_COMMIT_HOME="$(mktemp -d)" pre-commit try-repo . --all-files
 ```
 
 The smoke test downloads a release archive; remove the temporary pre-commit directory afterward.
