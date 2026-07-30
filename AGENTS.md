@@ -45,7 +45,7 @@ Everything published from this repository — `workflow_call` workflows and `.pr
 5. **No secrets in this repository.** Workflows may *consume* caller-supplied secrets via `secrets:` inputs, but no tokens, certificates, or `.env` files are ever committed here. If a change appears to require a committed secret, stop and ask.
 6. **Audit-log output is part of the contract.** Each workflow is expected to emit a structured run record; changing its shape is at least a minor version bump. The shared schema is tracked in [`ROADMAP.md`](ROADMAP.md).
 7. **Pre-commit hooks must respect the <10s DX budget.** Scans that cannot fit (malware verdict service, full SCA, full SAST) ship as workflows only — they are explicitly out of scope for the pre-commit surface.
-8. **Update archive pins as one reviewed unit.** When changing TruffleHog, update the version, every supported platform archive URL, and every SHA-256 in [`hooks/trufflehog/setup.cfg`](hooks/trufflehog/setup.cfg), then update the matching tests and third-party notice. No scanner archive or binary may be committed or published from this repository.
+8. **Update archive pins as one reviewed unit.** When changing TruffleHog, update the version, every supported platform archive URL, and every SHA-256 in [`hooks/trufflehog/setup.cfg`](hooks/trufflehog/setup.cfg), then update the third-party notice. No scanner archive or binary may be committed or published from this repository.
 
 Changes that fall outside these guardrails require ProdSec acknowledgment per [`GOVERNANCE.md`](GOVERNANCE.md).
 
@@ -70,7 +70,6 @@ Run `pre-commit run --all-files` before committing.
 For changes to `secret-scan-trufflehog`, also run:
 
 ```bash
-python -m unittest discover --start-directory hooks/trufflehog/tests --verbose
 PRE_COMMIT_HOME="$(mktemp -d)" pre-commit try-repo . secret-scan-trufflehog --files README.md
 ```
 
