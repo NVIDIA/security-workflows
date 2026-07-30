@@ -74,6 +74,8 @@ PRE_COMMIT_HOME="$(mktemp -d)" pre-commit try-repo . --all-files
 ```
 
 The smoke test downloads a release archive; remove the temporary pre-commit directory afterward.
+It covers hooks that run at the `pre-commit` stage; add stage-specific smoke
+coverage for a hook limited to another stage.
 
 ---
 
