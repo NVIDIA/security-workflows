@@ -26,7 +26,7 @@ The goal of this repository is to give every NVIDIA repository a consistent, aud
 
 Workflows in this repository are designed around a few shared principles:
 
-- **One contract per scan type.** Each scan category is exposed as a single reusable workflow with a stable `workflow_call` interface. Callers depend on the interface, not the implementation underneath.
+- **One contract per scan type.** Each scan category is exposed as a single reusable workflow with a stable `workflow_call` interface. Callers depend on the interface, not the implementation underneath. Repositories that need every currently published CI scan can use the `all-scans.yml` aggregate, which fans out to the scan workflows in parallel; its full contract is in the [workflow catalogue](.github/workflows/README.md).
 - **Self-hosted runners required for internal-service scans.** Workflows that use NVIDIA-internal services — Vault (OIDC) and `nvcr.io` scanner images, e.g. the Pulse secret scan — run **only** on `nv-gha-runners`; those services are unreachable from GitHub-hosted runners. Workflows with no such dependency (e.g. CodeQL SAST) may run on GitHub-hosted runners.
 - **Fail-closed by default.** A finding blocks the merge unless an explicit, documented exception applies.
 - **Audit-ready output.** Each run emits a structured audit record for downstream compliance roll-up.

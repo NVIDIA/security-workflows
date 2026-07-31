@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Security Workflows — aggregate reusable workflow.
+#
+# Fans out to every currently published scanner workflow. Jobs deliberately
+# have no dependencies so GitHub Actions schedules the scans in parallel.
+
+name: Security Scans (All)
+
+on:
+  workflow_call:
+    inputs:
+      secret-runs-on:
+        description: Runner label for the Pulse secret scan (an nv-gha-runners label).
+        type: string
+        required: false
+        default: linux-amd64-cpu4
+      secret-failure-policy:
+        description: >-
+          Pulse finding policy: unverified (default), strict, or all.
+          See secret-scan-pulse.yml for the full policy semantics.
+        type: string
+        required: false
+        default: unverified
+      sast-languages:
+        description: >-
+          Required JSON array of CodeQL languages, for example '["actions"]'.
+          See sast-scan-codeql.yml for the supported values.
+        type: string
+        required: true
+      sast-runs-on:
+        description: Runner label for the CodeQL SAST scan.
+        type: string
+        required: false
+        default: ubuntu-latest
+      sast-build-mode:
+        description: >-
+          CodeQL build mode: none (default) or autobuild.
+        type: string
+        required: false
+        default: none
+      sast-queries:
+        description: CodeQL query suite(s), comma-separated.
+        type: string
+        required: false
+        default: security-extended
+      sast-config-file:
+        description: Optional path in the consuming repository to a CodeQL config file.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret scan (Pulse)
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      runs-on: ${{ inputs.secret-runs-on }}
+      failure_policy: ${{ inputs.secret-failure-policy }}
+
+  sast-scan:
+    name: SAST (CodeQL)
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/sast-scan-codeql.yml
+    with:
+      languages: ${{ inputs.sast-languages }}
+      runs-on: ${{ inputs.sast-runs-on }}
+      build-mode: ${{ inputs.sast-build-mode }}
+      queries: ${{ inputs.sast-queries }}
+      config-file: ${{ inputs.sast-config-file }}

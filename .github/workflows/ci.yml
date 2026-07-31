@@ -247,6 +247,21 @@ jobs:
       ci_test_setup: true
 
   # ============================================================================
+  # Aggregate scan workflow — self test the parallel Pulse + CodeQL fan-out.
+  # It runs only when the Pulse integration environment is available.
+  # ============================================================================
+  security-scans-dogfood:
+    name: Security scans (all) — self test
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/all-scans.yml
+    with:
+      sast-languages: '["actions"]'
+
   # SAST (CodeQL) — self test the reusable workflow on this repo's own sources.
   # This repo is workflows + shell, so the relevant CodeQL language is "actions".
   # Alerts-first: analyze uploads to code scanning; it does not fail on findings.

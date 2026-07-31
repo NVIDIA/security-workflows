@@ -25,6 +25,7 @@
 
 | Item | Status | Notes |
 |---|---|---|
+| Aggregate scanner workflow | Design — [`.github/workflows/all-scans.yml`](.github/workflows/all-scans.yml) | Fans out to each published scanner in parallel; initially Pulse secret scanning and CodeQL SAST. |
 | SHA-pinning policy and tooling | Planned | Enforce 40-char SHA pins on all `uses:` references in published workflows |
 | Audit-log schema (v1) | Planned | Common shape for the structured run record emitted by every scan workflow |
 | Pilot consumer onboarding guide | Planned | Will land alongside the first published workflow |

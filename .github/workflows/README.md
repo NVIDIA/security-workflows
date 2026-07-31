@@ -7,6 +7,7 @@ Inputs and defaults are documented inline in each workflow's `workflow_call` blo
 
 | Workflow | Scan | Scanner |
 |---|---|---|
+| [`all-scans.yml`](all-scans.yml) | All currently published scans | Fans out to Pulse secret scanning and CodeQL SAST in parallel |
 | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Secret | Pulse Secret Scanner — TruffleHog Enterprise, NVIDIA-licensed, Self-hosted runners only |
 | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | SAST | CodeQL (`github/codeql-action`, pinned inside the workflow) |
 
@@ -41,6 +42,39 @@ jobs:
 ```
 
 ## Scans
+
+### All security scans — [`all-scans.yml`](all-scans.yml)
+
+Runs every currently published scanner workflow in independent jobs, so the
+scans run in parallel. Today this includes the Pulse secret scan and CodeQL
+SAST; new scanner workflows will be added to this fan-out as they are
+published.
+
+The aggregate requires `sast-languages` because CodeQL needs an explicit,
+repository-specific language list. CodeQL Default setup must be off, just as
+when calling the SAST workflow directly. The caller needs the union of the
+child workflows' permissions:
+
+```yaml
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  security-events: write
+
+jobs:
+  security-scans:
+    uses: NVIDIA/security-workflows/.github/workflows/all-scans.yml@<COMMIT-SHA>
+    with:
+      sast-languages: '["actions"]'
+      # Optional category-prefixed overrides:
+      # secret-failure-policy: strict
+      # secret-runs-on: linux-amd64-cpu4
+      # sast-runs-on: ubuntu-latest
+      # sast-build-mode: autobuild
+      # sast-queries: +security-and-quality
+      # sast-config-file: .github/codeql/codeql.yml
+```
 
 ### Secret scan — [`secret-scan-pulse.yml`](secret-scan-pulse.yml)
 
