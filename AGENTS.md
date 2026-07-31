@@ -9,11 +9,11 @@ Guidelines for agents (and humans) working in the NVIDIA Security Workflows repo
 This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. It exposes **two surfaces**:
 
 - **Reusable GitHub Actions workflows** under `.github/workflows/` — job-level server-side enforcement via [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows). Each workflow declares its own `permissions:` block and runs in an isolated job. This is the CI enforcement surface for security gates per guardrail #4 (least-privilege).
-- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. Hooks use `language: script` and delegate to thin wrapper scripts under [`hooks/`](hooks/) that encode NVIDIA-approved args and resolve the scanner binary from `$PATH`. Pre-commit runs on developer machines only; consumers need the underlying scanner binary installed locally (per-tool install steps live in each wrapper's header).
+- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and downloads the pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment; consumers need no system scanner or shell installer.
 
 Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
 
-The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the local-advisory pre-commit hook [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) → [`hooks/trufflehog.sh`](hooks/trufflehog.sh) (open-source `trufflesecurity/trufflehog`). Pulse is container-only, so it is CI-only; the pre-commit lane deliberately uses the OSS CLI to stay within the <10s DX budget on developer machines.
+The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the local-advisory pre-commit hook [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) (open-source `trufflesecurity/trufflehog`, installed into pre-commit's isolated environment). Pulse is container-only, so it is CI-only; the pre-commit lane deliberately uses the OSS CLI to stay within the <10s DX budget on developer machines.
 
 ---
 
@@ -45,6 +45,7 @@ Everything published from this repository — `workflow_call` workflows and `.pr
 5. **No secrets in this repository.** Workflows may *consume* caller-supplied secrets via `secrets:` inputs, but no tokens, certificates, or `.env` files are ever committed here. If a change appears to require a committed secret, stop and ask.
 6. **Audit-log output is part of the contract.** Each workflow is expected to emit a structured run record; changing its shape is at least a minor version bump. The shared schema is tracked in [`ROADMAP.md`](ROADMAP.md).
 7. **Pre-commit hooks must respect the <10s DX budget.** Scans that cannot fit (malware verdict service, full SCA, full SAST) ship as workflows only — they are explicitly out of scope for the pre-commit surface.
+8. **Update archive pins as one reviewed unit.** When changing TruffleHog, update the version, every supported platform archive URL, and every SHA-256 in [`hooks/trufflehog/setup.cfg`](hooks/trufflehog/setup.cfg), then update the third-party notice. No scanner archive or binary may be committed or published from this repository.
 
 Changes that fall outside these guardrails require ProdSec acknowledgment per [`GOVERNANCE.md`](GOVERNANCE.md).
 
@@ -66,11 +67,21 @@ actionlint
 
 Run `pre-commit run --all-files` before committing.
 
+For changes to published pre-commit hooks, also run:
+
+```bash
+PRE_COMMIT_HOME="$(mktemp -d)" pre-commit try-repo . --all-files
+```
+
+The smoke test downloads a release archive; remove the temporary pre-commit directory afterward.
+It covers hooks that run at the `pre-commit` stage; add stage-specific smoke
+coverage for a hook limited to another stage.
+
 ---
 
 ## Out of Scope
 
-- Application source code or libraries — this is a workflow-only repository.
+- Application source code or libraries — this is a workflow-only repository, apart from the minimal packaging metadata needed for pre-commit hook installation.
 - Per-repository configuration for downstream consumers — lives in each consumer repo, not here.
 
 ---

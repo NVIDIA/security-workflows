@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+# Keep the helper on a released artifact; the smoke test treats warnings as
+# errors so build-time regressions remain visible.
+requires = [
+    "setuptools>=70.1",
+    "setuptools-download==1.1.0",
+]
+build-backend = "setuptools.build_meta"

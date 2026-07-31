@@ -6,11 +6,12 @@
 - id: secret-scan-trufflehog
   name: check for leaked secrets (trufflehog)
   description: >-
-    Scans changed files for verified secret leaks using TruffleHog. The wrapper
-    downloads a pinned, checksum-verified TruffleHog release into a per-user
-    cache on first use — no manual install required (see hooks/trufflehog.sh).
-  entry: hooks/trufflehog.sh
-  language: script       # self-installing wrapper
-  pass_filenames: true   # scope scan to changed files
-  require_serial: true   # one invocation per run
+    Scans changed files for verified secret leaks using TruffleHog. On first
+    installation, pre-commit creates an isolated Python environment and
+    installs the platform-specific, SHA-256-pinned TruffleHog release there.
+  entry: trufflehog filesystem --results=verified --fail --no-update
+  language: python
+  additional_dependencies: [./hooks/trufflehog]
+  pass_filenames: true
+  require_serial: true
   stages: [pre-commit, pre-push]

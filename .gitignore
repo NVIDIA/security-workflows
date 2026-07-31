@@ -18,3 +18,10 @@ Thumbs.db
 
 # Pre-commit local cache
 .pre-commit-cache/
+
+# TruffleHog hook-package build artifacts. The executable is downloaded only
+# into a pre-commit environment and must never be committed.
+/hooks/trufflehog/build/
+/hooks/trufflehog/dist/
+/hooks/trufflehog/*.egg-info/
+/nvidia_security_workflows_pre_commit_bridge.egg-info/

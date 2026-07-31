@@ -5,7 +5,7 @@
 
 Centrally maintained, reusable GitHub Actions workflows for the security-compliance scans rolled out by the NVIDIA GitHub-First initiative.
 
-This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It publishes two artifact types: **reusable GitHub Actions workflows** (`workflow_call`) under [`.github/workflows/`](.github/workflows/README.md) for job-level server-side enforcement, and **pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for local-advisory checks on the developer's machine. Pre-commit hooks delegate to thin wrapper scripts under [`hooks/`](hooks/) that encode the NVIDIA-approved args and resolve the scanner binary from `$PATH`; consumers need the underlying scanner binaries installed locally (per-tool install steps live in each wrapper's header). Both surfaces are pinned per the [surface-specific policy below](#pin-policy-per-surface).
+This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It publishes two artifact types: **reusable GitHub Actions workflows** (`workflow_call`) under [`.github/workflows/`](.github/workflows/README.md) for job-level server-side enforcement, and **pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for local-advisory checks on the developer's machine. `secret-scan-trufflehog` downloads a pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment during hook installation, so consumers need no system scanner or shell installer. Both surfaces are pinned per the [surface-specific policy below](#pin-policy-per-surface).
 
 Pre-commit and CI are complementary, not alternatives: pre-commit is local-advisory (best-effort, optimized for developer experience) and CI is server-side enforcement (authoritative, fail-closed). The CI surface is a reusable workflow (declared `permissions:`, isolated job) — the preferred shape for security gates. A scan category may ship the CI workflow, the pre-commit hook, or both, depending on whether it fits the <10s local-execution budget.
 
@@ -89,11 +89,8 @@ The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md).
 **Pre-commit hook** (in a consumer's `.pre-commit-config.yaml`):
 
 ```yaml
-# Consumers reference this repository, not upstream scanner repos directly —
-# the NVIDIA-approved args and binary-resolution order live in
-# security-workflows/hooks/<tool>.sh; .pre-commit-hooks.yaml declares the hook
-# id and delegates to that wrapper via `language: script`. Consumers need the
-# underlying scanner binary installed locally (each wrapper has install steps).
+# `secret-scan-trufflehog` installs its pinned scanner in pre-commit's
+# isolated environment; no system TruffleHog installation is needed.
 - repo: https://github.com/NVIDIA/security-workflows
   rev: v0.1.0                              # release tag — see Pin policy per surface below
   hooks:
@@ -104,7 +101,7 @@ The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md).
 
 ### Consumers (downstream NVIDIA repositories)
 
-Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`; hooks use `language: script` and delegate to wrapper scripts under [`hooks/`](hooks/) that encode NVIDIA's chosen args and fail-policy. Pre-commit runs on developer machines only — consumers need the underlying scanner binaries installed locally, and per-tool install steps live in each wrapper's header. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
+Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`. `secret-scan-trufflehog` uses `language: python` and installs its pinned, SHA-256-verified TruffleHog release in pre-commit's isolated environment; consumers need no system scanner or shell installer. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
 
 Per-surface onboarding instructions — runner labels, trigger model, hook arguments, required developer-side tooling, security trade-offs — are documented inline: each workflow file's `workflow_call` definition and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
 
