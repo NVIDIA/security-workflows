@@ -1,5 +1,5 @@
-# Configuration file for `copy-pr-bot` GitHub App
-# https://docs.gha-runners.nvidia.com/apps/copy-pr-bot/
+# Configuration file for the copy-pr-bot GitHub App.
+# Setup guidance (NVIDIA-internal): http://nv/gha-runners
 
 enabled: true
 auto_sync_draft: false

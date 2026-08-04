@@ -124,7 +124,9 @@ Maintainer escalation paths are in [`MAINTAINERS.md`](MAINTAINERS.md).
 
 The Vault- and `nvcr.io`-backed CI workflows (e.g. the Pulse secret scan) run **only on NVIDIA's self-hosted runners (`nv-gha-runners`)**. They mint short-lived credentials to pull the scanner image and are reachable only from self-hosted runners. On GitHub-hosted runners (`ubuntu-latest`) the Vault step fails and the scan cannot run. Workflows without those dependencies (e.g. CodeQL SAST) may use GitHub-hosted runners.
 
-Pass an actual runner **label** to `runs-on` (e.g. `linux-amd64-cpu4`). CPU-only pools are sufficient for every scan category in scope. See [runner-groups.md](https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/runner-groups.md) for the label↔group mapping and [`docs.gha-runners.nvidia.com`](https://docs.gha-runners.nvidia.com/) for the platform.
+Pass an actual runner **label** to `runs-on` (e.g. `linux-amd64-cpu4`). CPU-only pools are sufficient for every scan category in scope. See the [runner label catalog](https://nv/gha-runner-labels) for the label↔group mapping and the [runner platform documentation](https://nv/gha-runners-docs) for the platform itself.
+
+> `nv/…` links in this document are NVIDIA-internal and resolve only from the NVIDIA network. NVIDIA maintainers of consumer repositories are the audience for the runner onboarding steps.
 
 ### GitHub repository requirements
 
@@ -140,7 +142,7 @@ Specific per-workflow requirements are documented inline in each workflow file's
 
 To run the CI security workflows in your repository:
 
-1. **Get self-hosted runner access.** Your org must have the [`nvidia-runner-mgmt`](https://github.com/apps/nvidia-runner-mgmt) app installed, and your repo must be granted a runner group (e.g. `nv-cpu-general`) via a PR to [`nv-gha-runners/enterprise-runner-configuration`](https://github.com/nv-gha-runners/enterprise-runner-configuration) — see [Requesting Access](https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/requesting-access.md).
+1. **Get self-hosted runner access.** Your org must have the [`nvidia-runner-mgmt`](https://nv/gha-runner-app) app installed, and your repo must be granted a runner group (e.g. `nv-cpu-general`) via a PR to the [runner configuration repository](https://nv/gha-runner-config) — see [Requesting access](https://nv/gha-runner-access).
 2. **Confirm the Vault / Pulse Actions variables exist** (secret-scan only). The Pulse workflow reads repo/org variables `NV_VAULT_URL`, `NVCR_VAULT_*`, `SECRET_SCAN_PULSE_IMAGE`, and `SECRET_SCAN_PULSE_IMAGE_TAG`. If unset, the Vault step fails with `Input required and not supplied: url` — ask the GitHub-First platform team to provision them.
 3. **Add the caller workflow** — reference the reusable workflow pinned by commit SHA, grant the permissions it declares, and set `runs-on` to a real label (see the [Example](#example)).
 4. **Add the pre-commit hook** (optional, local-advisory) — see the [Example](#example).
@@ -184,7 +186,7 @@ The deprecation window will depend on the impact of the change but will usually 
 ## Related Projects
 
 - [`pre-commit`](https://pre-commit.com/) — Upstream framework that consumes the `.pre-commit-hooks.yaml` manifest in this repository. The [Installation](https://pre-commit.com/#install) and [Usage](https://pre-commit.com/#usage) sections cover `pre-commit install`, `pre-commit run`, and `pre-commit autoupdate` — the commands consumers will use to install and refresh the hooks defined here.
-- [`NVIDIA-GitHub-Management/PLC-OSS-Template`](https://github.com/NVIDIA-GitHub-Management/PLC-OSS-Template) — NVIDIA OSS repository template.
+- [NVIDIA OSS repository template](https://nv/oss-repo-template) — Template NVIDIA maintainers start new OSS repositories from.
 
 ## Repositories Using These Workflows
 
