@@ -20,7 +20,7 @@ Branch or tag references (`@main`, `@latest`) are not acceptable.
 **2. Grant every permission the workflow declares.** A caller must grant *at least* what the reusable workflow declares, or the run fails at load time with `requesting '<scope>', but is only allowed '<scope>: none'`.
 Copy the `permissions:` block from the scan's section — do not trim it to what looks necessary.
 
-**3. Use a nv-gha-runner label as assigned** `runs-on` takes a label (e.g. `linux-amd64-cpu4`), See [runner-groups.md](https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/runner-groups.md).
+**3. Use a nv-gha-runner label as assigned.** `runs-on` takes a label (e.g. `linux-amd64-cpu4`). See the [runner label catalog](https://nv/gha-runner-labels) (NVIDIA-internal).
 
 **4. Onboard the repository first.** Runner access and repository-level expectations (Actions enabled, branch protection, `copy-pr-bot` for fork PRs) are in [Onboarding a repository](../../README.md#onboarding-a-repository).
 
