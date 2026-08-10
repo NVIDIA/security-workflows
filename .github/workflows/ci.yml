@@ -103,6 +103,16 @@ jobs:
           PYTHONWARNINGS: error
         run: pre-commit try-repo . --all-files
 
+      # Regression: TruffleHog's Lob detector matched pytest function names (`test_` plus 35 characters) and its verifier reported them as verified.
+      # failing the hook on every Python repository with long test names.
+      # The fixture is written at run time rather than committed so the repository's own Pulse self-tests never scan it.
+      - name: Regression — pytest function names must not trip a detector
+        shell: bash
+        run: |
+          printf 'def test_gpu_conf_compute_attestation_report():\n    pass\n' > lob_false_positive_fixture.py
+          pre-commit try-repo . secret-scan-trufflehog --files lob_false_positive_fixture.py
+          rm -f lob_false_positive_fixture.py
+
   # ============================================================================
   # failure_policy: strict (strictest) — must fail on ANY finding
   # ============================================================================
