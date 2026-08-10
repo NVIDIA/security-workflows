@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Security suite reusable workflow — [`.github/workflows/security-suite.yml`](.github/workflows/security-suite.yml) runs the scans a caller enables (`enable-secret-scan`, `enable-sast-scan`) in parallel behind one pinned reference. Every scan is opt-in, including scans added in future releases, so onboarding a repository to the suite never turns on a scan it did not ask for; category-prefixed inputs preserve the child workflows' runner and policy configuration. A suite call that enables nothing warns instead of failing.
 - SAST (CodeQL) reusable workflow — [`.github/workflows/sast-scan-codeql.yml`](.github/workflows/sast-scan-codeql.yml). Generic, matrix-driven CodeQL analysis (`languages`, `build-mode`, `queries`, `packs`, `config-file`, `runs-on` inputs) with the `github/codeql-action` steps pinned by SHA. Positioned as the **customization-tier** lever — the fleet baseline for CodeQL is GitHub Default setup via org/enterprise Security Configurations. See [`.github/workflows/README.md`](.github/workflows/README.md#sast-codeql) for prerequisites (GHAS/code scanning, Default-setup conflict) and usage.
 
 ### Changed

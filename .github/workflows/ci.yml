@@ -247,6 +247,39 @@ jobs:
       ci_test_setup: true
 
   # ============================================================================
+  # Security suite — self test the fan-out and the enable-* gating.
+  # It runs only when the Pulse integration environment is available.
+  #
+  # Only the secret scan is enabled here. sast-scan-codeql.yml uploads with the fixed
+  # category "/language:<lang>", so enabling SAST here as well would publish a second
+  # /language:actions analysis for the same commit as sast-codeql-dogfood below and the
+  # two would race in code scanning. The SAST passthrough is covered by that job.
+  # ============================================================================
+  security-suite-dogfood:
+    name: Security suite — self test
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/security-suite.yml
+    with:
+      enable-secret-scan: true
+
+  # NEGATIVE: a suite call that enables nothing must warn and stay GREEN, not fail.
+  # Grants the union of every child job's permissions even though no scan will run:
+  # a caller is validated against what the called workflow declares, not against the
+  # subset its `if:` conditions will schedule. Granting less is a startup failure.
+  security-suite-noop-dogfood:
+    name: Security suite (no scans enabled) — negative (must pass with a warning)
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/security-suite.yml
+
   # SAST (CodeQL) — self test the reusable workflow on this repo's own sources.
   # This repo is workflows + shell, so the relevant CodeQL language is "actions".
   # Alerts-first: analyze uploads to code scanning; it does not fail on findings.

@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Security Workflows — security suite reusable workflow.
+#
+# Fans out to the published scanner workflows. Jobs deliberately have no dependencies
+# on each other so GitHub Actions schedules the enabled scans in parallel.
+#
+# Every scan is opt-in: a caller enables exactly the scans that apply to its repository,
+# because no single scan set fits every repository (runner access, CodeQL Default setup,
+# and language mix all differ).
+#
+# CONVENTION FOR FUTURE SCANS: add a new scan here with `enable-<scan>: false`. Flipping a
+# default from false to true silently changes what every existing caller runs, so it is a
+# MAJOR version bump — see the Versioning section of ../../README.md.
+#
+# PERMISSIONS: a caller must grant the union of every scan job's permissions below, including
+# scans it disables. GitHub validates the caller against the permissions this file declares
+# before evaluating any `if:`, so a short grant is a startup failure, not a skipped job. Adding
+# a scan that needs a scope no existing scan declares is therefore also a MAJOR version bump.
+
+name: Security Suite
+
+on:
+  workflow_call:
+    inputs:
+      enable-secret-scan:
+        description: >-
+          Run the Pulse secret scan (secret-scan-pulse.yml). Off by default.
+          Requires self-hosted nv-gha-runners.
+        type: boolean
+        required: false
+        default: false
+      enable-sast-scan:
+        description: >-
+          Run the CodeQL SAST scan (sast-scan-codeql.yml). Off by default.
+          Enable it only for repositories deliberately on Advanced setup, and set sast-languages when you do.
+        type: boolean
+        required: false
+        default: false
+      suite-runs-on:
+        description: >-
+          Runner for the suite's preflight job.
+        type: string
+        required: false
+        default: ubuntu-latest
+      secret-runs-on:
+        description: Runner label for the Pulse secret scan (an nv-gha-runners label).
+        type: string
+        required: false
+        default: linux-amd64-cpu4
+      secret-failure-policy:
+        description: >-
+          Pulse finding policy: unverified (default), strict, or all.
+          See secret-scan-pulse.yml for the full policy semantics.
+        type: string
+        required: false
+        default: unverified
+      sast-languages:
+        description: >-
+          JSON array of CodeQL languages, for example '["actions"]'.
+          Required when enable-sast-scan is true; ignored otherwise.
+        type: string
+        required: false
+        default: ''
+      sast-runs-on:
+        description: Runner label for the CodeQL SAST scan.
+        type: string
+        required: false
+        default: ubuntu-latest
+      sast-build-mode:
+        description: >-
+          CodeQL build mode: none (default) or autobuild.
+        type: string
+        required: false
+        default: none
+      sast-queries:
+        description: CodeQL query suite(s), comma-separated.
+        type: string
+        required: false
+        default: security-extended
+      sast-config-file:
+        description: Optional path in the consuming repository to a CodeQL config file.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Suite preflight
+    if: >-
+      ${{ (!inputs.enable-secret-scan && !inputs.enable-sast-scan)
+          || (inputs.enable-sast-scan && inputs.sast-languages == '') }}
+    runs-on: ${{ inputs.suite-runs-on }}
+    steps:
+      - name: Report suite selection
+        env:
+          ENABLE_SECRET_SCAN: ${{ inputs.enable-secret-scan }}
+          ENABLE_SAST_SCAN: ${{ inputs.enable-sast-scan }}
+          SAST_LANGUAGES: ${{ inputs.sast-languages }}
+        run: |
+          set -euo pipefail
+          if [ "$ENABLE_SAST_SCAN" = "true" ] && [ -z "$SAST_LANGUAGES" ]; then
+            echo "::error::enable-sast-scan is true but sast-languages is empty. Pass a JSON array of CodeQL languages, for example: sast-languages: '[\"actions\"]'."
+            exit 1
+          fi
+          if [ "$ENABLE_SECRET_SCAN" != "true" ] && [ "$ENABLE_SAST_SCAN" != "true" ]; then
+            echo "::warning::Security suite ran no scans — every enable-* input is false. Set enable-secret-scan and/or enable-sast-scan to true for this check to mean anything."
+          fi
+
+  secret-scan:
+    name: Secret scan (Pulse)
+    if: ${{ inputs.enable-secret-scan }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/secret-scan-pulse.yml
+    with:
+      runs-on: ${{ inputs.secret-runs-on }}
+      failure_policy: ${{ inputs.secret-failure-policy }}
+
+  sast-scan:
+    name: SAST (CodeQL)
+    if: ${{ inputs.enable-sast-scan && inputs.sast-languages != '' }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/sast-scan-codeql.yml
+    with:
+      languages: ${{ inputs.sast-languages }}
+      runs-on: ${{ inputs.sast-runs-on }}
+      build-mode: ${{ inputs.sast-build-mode }}
+      queries: ${{ inputs.sast-queries }}
+      config-file: ${{ inputs.sast-config-file }}
