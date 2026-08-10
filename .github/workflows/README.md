@@ -7,6 +7,7 @@ Inputs and defaults are documented inline in each workflow's `workflow_call` blo
 
 | Workflow | Scan | Scanner |
 |---|---|---|
+| [`security-suite.yml`](security-suite.yml) | Opt-in set of the scans below | Fans out in parallel to the scans the caller enables |
 | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Secret | Pulse Secret Scanner — TruffleHog Enterprise, NVIDIA-licensed, Self-hosted runners only |
 | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | SAST | CodeQL (`github/codeql-action`, pinned inside the workflow) |
 
@@ -41,6 +42,58 @@ jobs:
 ```
 
 ## Scans
+
+### Security suite — [`security-suite.yml`](security-suite.yml)
+
+One pinned reference that runs the scans you enable, each in its own job so they
+run in parallel. Use it instead of one caller block per scan.
+
+**Every scan is opt-in.** A suite call with no `enable-*` input runs nothing and
+emits a warning — it does not fail, but it also does not mean anything, so set at
+least one. Scans added to the suite in future releases will also default to off;
+turning a default on is treated as a breaking change (see [Versioning](../../README.md#versioning)).
+
+| Input | Enables | Notes |
+|---|---|---|
+| `enable-secret-scan` | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Self-hosted `nv-gha-runners` and the Vault / Pulse variables required. |
+| `enable-sast-scan` | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | Requires `sast-languages`, and requires CodeQL Default setup to be **off**. Most repositories should stay on Default setup and leave this off. |
+
+**Grant the union of every scan's permissions, not just the ones you enable.** GitHub
+validates a caller against what the called workflow *declares*, before any `if:` is
+evaluated, so a suite call that grants less fails at startup with
+`The nested job '<scan>' is requesting '<scope>'` even when that scan is disabled:
+
+```yaml
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  security-events: write
+
+jobs:
+  security-scans:
+    uses: NVIDIA/security-workflows/.github/workflows/security-suite.yml@<COMMIT-SHA>
+    with:
+      enable-secret-scan: true
+      # Advanced-setup repositories only — leave off if you use CodeQL Default setup:
+      # enable-sast-scan: true
+      # sast-languages: '["actions"]'
+      #
+      # Optional category-prefixed overrides:
+      # secret-failure-policy: strict
+      # secret-runs-on: linux-amd64-cpu4
+      # sast-runs-on: ubuntu-latest
+      # sast-build-mode: autobuild
+      # sast-queries: +security-and-quality
+      # sast-config-file: .github/codeql/codeql.yml
+      #
+      # Runner for the preflight job, which is scheduled only to report an empty or
+      # invalid selection. Set this if you cannot use GitHub-hosted runners:
+      # suite-runs-on: linux-amd64-cpu4
+```
+
+Enabling SAST without `sast-languages` fails the suite with an explicit error rather
+than starting a scan that cannot work.
 
 ### Secret scan — [`secret-scan-pulse.yml`](secret-scan-pulse.yml)
 
