@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Secret-scan (Pulse) — the reusable workflow no longer uploads SARIF on CI self-test runs (`ci_test_setup: true`), so the disposable RSA fixture no longer publishes a code-scanning alert to the default-branch Security tab. Real consumer scans are unaffected.
 - Secret-scan (pre-commit) — `secret-scan-trufflehog` now installs the SHA-256-pinned TruffleHog release in pre-commit's isolated Python environment rather than the per-user cache.
 
+### Fixed
+
+- Secret-scan (pre-commit) — `secret-scan-trufflehog` no longer fails on pytest function names. A Lob API key is `test_` followed by 35 characters, so TruffleHog's Lob detector matched names such as `test_gpu_conf_compute_attestation_report` and its verifier reported them as **verified**, the one result class the hook blocks on. Lob is now excluded from the hook's detector set.
+
 ## [0.2.0] - 2026-07-24
 
 ### Changed
