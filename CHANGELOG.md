@@ -4,7 +4,7 @@ All notable changes to the workflows in this repository will be documented in th
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See [`README.md`](README.md#versioning) for the SHA-pinning contract that consumers are expected to follow.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-11
 
 ### Added
 
@@ -57,5 +57,7 @@ First pilot release. Ships the secret-scan surface (Pulse reusable workflow + Tr
 
 - Third-party notices — TruffleHog (AGPL-3.0, developer-installed CLI) and the direct workflow actions (`actions/checkout`, `hashicorp/vault-action`, `docker/login-action`, `actions/setup-python`, `github/codeql-action/upload-sarif`) recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) with SHA pins where applicable.
 
-[Unreleased]: https://github.com/NVIDIA/security-workflows/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/NVIDIA/security-workflows/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/NVIDIA/security-workflows/releases/tag/v0.3.0
+[0.2.0]: https://github.com/NVIDIA/security-workflows/releases/tag/v0.2.0
 [0.1.0]: https://github.com/NVIDIA/security-workflows/releases/tag/v0.1.0
