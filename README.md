@@ -92,7 +92,7 @@ The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md).
 # `secret-scan-trufflehog` installs its pinned scanner in pre-commit's
 # isolated environment; no system TruffleHog installation is needed.
 - repo: https://github.com/NVIDIA/security-workflows
-  rev: v0.1.0                              # release tag — see Pin policy per surface below
+  rev: v0.3.0                              # release tag — see Pin policy per surface below
   hooks:
     - id: secret-scan-trufflehog
 ```
