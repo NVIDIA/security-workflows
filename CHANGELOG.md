@@ -4,6 +4,16 @@ All notable changes to the workflows in this repository will be documented in th
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See [`README.md`](README.md#versioning) for the SHA-pinning contract that consumers are expected to follow.
 
+## [Unreleased]
+
+### Added
+
+- Documentation — the accepted `languages` / `sast-languages` values are now listed in the [workflow catalogue](.github/workflows/README.md#accepted-languages-values), with the two coverage gaps consumers hit first: CodeQL has no shell analyzer (cover Bash with `shellcheck`) and no CUDA analyzer (`c-cpp` skips `.cu` / `.cuh` device code). The list previously existed only in the `sast-scan-codeql.yml` input description, so callers could not find it from the repository's documentation.
+
+### Fixed
+
+- Documentation — the workflow catalogue gave the CodeQL `runs-on` default as `linux-amd64-cpu4`; the workflow defaults to `ubuntu-latest`. The catalogue's shared runner rule also stated that every workflow needs an `nv-gha-runners` label, which is untrue for CodeQL — it reaches no NVIDIA-internal service. The `runs-on` input description in [`sast-scan-codeql.yml`](.github/workflows/sast-scan-codeql.yml) carried the same contradiction.
+
 ## [0.3.0] - 2026-08-11
 
 ### Added

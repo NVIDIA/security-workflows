@@ -21,10 +21,13 @@ on:
         description: >-
           JSON array of CodeQL languages to analyze; each entry becomes a matrix leg. Examples: '["actions"]' or '["python","javascript-typescript"]'.
           Valid values: actions, c-cpp, csharp, go, java-kotlin, javascript-typescript, python, ruby, rust, swift.
+          CodeQL has no shell analyzer (cover Bash with a linter such as shellcheck) and no CUDA analyzer (c-cpp skips .cu/.cuh device code).
         type: string
         required: true
       runs-on:
-        description: Runner label to run on (an nv-gha-runners label).
+        description: >-
+          Runner label to run on. CodeQL reaches no NVIDIA-internal service, so the GitHub-hosted default is fine;
+          pass an nv-gha-runners label (e.g. linux-amd64-cpu4) only if the repository cannot use GitHub-hosted runners.
         type: string
         required: false
         default: ubuntu-latest

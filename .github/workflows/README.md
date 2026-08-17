@@ -21,7 +21,8 @@ Branch or tag references (`@main`, `@latest`) are not acceptable.
 **2. Grant every permission the workflow declares.** A caller must grant *at least* what the reusable workflow declares, or the run fails at load time with `requesting '<scope>', but is only allowed '<scope>: none'`.
 Copy the `permissions:` block from the scan's section — do not trim it to what looks necessary.
 
-**3. Use a nv-gha-runner label as assigned.** `runs-on` takes a label (e.g. `linux-amd64-cpu4`). See the [runner label catalog](https://nv/gha-runner-labels) (NVIDIA-internal).
+**3. Set `runs-on` to a real label.** Scans that reach NVIDIA-internal services (OIDC → Vault, `nvcr.io`) run **only** on self-hosted runners and need an `nv-gha-runners` label (e.g. `linux-amd64-cpu4`) — see the [runner label catalog](https://nv/gha-runner-labels) (NVIDIA-internal).
+Scans with no internal dependency (CodeQL SAST) default to a GitHub-hosted runner and need no label. Each scan's section below states which applies.
 
 **4. Onboard the repository first.** Runner access and repository-level expectations (Actions enabled, branch protection, `copy-pr-bot` for fork PRs) are in [Onboarding a repository](../../README.md#onboarding-a-repository).
 
@@ -56,7 +57,7 @@ turning a default on is treated as a breaking change (see [Versioning](../../REA
 | Input | Enables | Notes |
 |---|---|---|
 | `enable-secret-scan` | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Self-hosted `nv-gha-runners` and the Vault / Pulse variables required. |
-| `enable-sast-scan` | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | Requires `sast-languages`, and requires CodeQL Default setup to be **off**. Most repositories should stay on Default setup and leave this off. |
+| `enable-sast-scan` | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | Requires `sast-languages` — accepted values are listed under [Accepted `languages` values](#accepted-languages-values) — and requires CodeQL Default setup to be **off**. Most repositories should stay on Default setup and leave this off. |
 
 **Grant the union of every scan's permissions, not just the ones you enable.** GitHub
 validates a caller against what the called workflow *declares*, before any `if:` is
@@ -143,7 +144,31 @@ Scan-specific prerequisites:
 - **Runner toolchain.** `build-mode: none` needs no toolchain. `build-mode: autobuild` needs the language's build tools.
 - **Rollout alerts-first.** Enable without a merge gate, triage the backlog, then enforce via branch protection — turning enforcement on fleet-wide on day one lights every repo red.
 
-Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `linux-amd64-cpu4`), `build-mode` (default `none`), `queries` (default `security-extended`), `packs`, `config-file`.
+Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `ubuntu-latest`), `build-mode` (default `none`), `queries` (default `security-extended`), `packs`, `config-file`.
+
+#### Accepted `languages` values
+
+`languages` takes CodeQL's supported languages. Anything else fails at CodeQL init.
+
+| Value | Covers |
+|---|---|
+| `actions` | GitHub Actions workflows |
+| `c-cpp` | C, C++ |
+| `csharp` | C# |
+| `go` | Go |
+| `java-kotlin` | Java, Kotlin |
+| `javascript-typescript` | JavaScript, TypeScript |
+| `python` | Python |
+| `ruby` | Ruby |
+| `rust` | Rust |
+| `swift` | Swift |
+
+Two gaps to plan around:
+
+- **No shell analyzer.** CodeQL cannot analyze Bash or other shell. Cover shell with a linter such as [`shellcheck`](https://www.shellcheck.net/), typically at pre-commit.
+- **No CUDA analyzer.** The `c-cpp` extractor does not understand CUDA, so `.cu` / `.cuh` device code is not analyzed. A CUDA-heavy repository gets coverage only of its host-side translation units, and a useful C/C++ database usually needs `build-mode: autobuild` plus the full toolchain — price that build before enabling `c-cpp`.
+
+Every entry is its own matrix leg, so scan cost scales with the list. Start with the languages carrying the most risk, then widen once you have a runtime and alert-volume baseline.
 
 ```yaml
 permissions:
