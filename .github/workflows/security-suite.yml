@@ -59,6 +59,8 @@ on:
       sast-languages:
         description: >-
           JSON array of CodeQL languages, for example '["actions"]'.
+          Accepted values: actions, c-cpp, csharp, go, java-kotlin, javascript-typescript, python, ruby, rust, swift
+          — see sast-scan-codeql.yml for per-language caveats.
           Required when enable-sast-scan is true; ignored otherwise.
         type: string
         required: false
