@@ -10,7 +10,8 @@
 #   * Public repos: code scanning is free — no GHAS license required.
 #   * Private/internal repos: GitHub Advanced Security (Code Security) MUST be enabled or CodeQL SARIF upload is rejected.
 #   * CodeQL "Default setup" MUST be OFF on the repo — Default setup and an advanced/reusable workflow are mutually exclusive.
-#   * The runner must provide any toolchain/runtime a compiled language build needs (build-mode: autobuild/manual). build-mode: none needs no toolchain.
+#   * A language analyzed with build-mode autobuild needs its toolchain on the runner; build-mode none needs none.
+#     GitHub-hosted runners ship the common toolchains; self-hosted images may not.
 
 name: SAST (CodeQL)
 
@@ -19,27 +20,37 @@ on:
     inputs:
       languages:
         description: >-
-          JSON array of CodeQL languages to analyze; each entry becomes a matrix leg. Examples: '["actions"]' or '["python","javascript-typescript"]'.
-          Valid values: actions, c-cpp, csharp, go, java-kotlin, javascript-typescript, python, ruby, rust, swift.
-          CodeQL has no shell analyzer (cover Bash with a linter such as shellcheck) and no CUDA analyzer (c-cpp skips .cu/.cuh device code).
+          JSON array of CodeQL languages to analyze; each entry becomes a matrix leg. Entries may be plain strings — '["actions","python"]'
+          or objects carrying per-language overrides: '[{"language":"go","build-mode":"autobuild"},{"language":"swift","runs-on":"macos-14"},"rust"]'.
+          Valid languages: actions, c-cpp, csharp, go, java-kotlin, javascript-typescript, python, ruby, rust, swift.
+          Each language's build mode is resolved automatically, so languages with incompatible requirements (go needs autobuild, rust supports only none) can be analyzed together in a single call.
+          CodeQL has no shell and CUDA analyzer.
         type: string
         required: true
       runs-on:
         description: >-
-          Runner label to run on. CodeQL reaches no NVIDIA-internal service, so the GitHub-hosted default is fine;
-          pass an nv-gha-runners label (e.g. linux-amd64-cpu4) only if the repository cannot use GitHub-hosted runners.
+          Default runner label for the analysis legs; override per language with the object form of languages.
+          CodeQL reaches no NVIDIA-internal service, so the GitHub-hosted default is fine;
+          swift is analyzed on macOS only and needs a macOS label.
         type: string
         required: false
         default: ubuntu-latest
       build-mode:
         description: >-
-          CodeQL build mode applied to every matrixed language.
-          none (default) — no toolchain, scans source directly (works for every language; the only mode for interpreted languages).
-          autobuild — best-effort compile for compiled languages.
-          manual is intentionally unsupported here (a reusable workflow cannot carry a repo-specific build) — use a standalone advanced workflow.
+          Preferred CodeQL build mode, applied to every language that supports it.
+          none (default) — no toolchain, scans source directly. autobuild — best-effort compile.
+          A language that cannot honour this value is resolved to the mode CodeQL does support and the substitution is reported in the job log, so mixed-requirement language sets do not fail.
+          Set build-mode per language with the object form of languages when you need exact control.
+          manual is intentionally unsupported (a reusable workflow cannot carry a repo-specific build).
         type: string
         required: false
         default: none
+      resolve-runs-on:
+        description: >-
+          Runner for the short job that resolves and validates the language matrix. Set this only if the repository cannot use GitHub-hosted runners.
+        type: string
+        required: false
+        default: ubuntu-latest
       queries:
         description: >-
           CodeQL query suite(s), comma-separated. Prefix with '+' to append to the default suite (e.g. +security-and-quality).
@@ -66,13 +77,129 @@ permissions:
   security-events: write
 
 jobs:
+  resolve:
+    name: Resolve language matrix
+    runs-on: ${{ inputs.resolve-runs-on }}
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve build mode and runner per language
+        id: resolve
+        env:
+          LANGUAGES: ${{ inputs.languages }}
+          DEFAULT_BUILD_MODE: ${{ inputs.build-mode }}
+          DEFAULT_RUNS_ON: ${{ inputs.runs-on }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$LANGUAGES" | jq empty 2>/dev/null; then
+            echo "::error::languages is not valid JSON. Received: ${LANGUAGES}"
+            exit 1
+          fi
+
+          # Authoritative per-language build-mode support, per
+          # https://docs.github.com/en/code-security/reference/code-scanning/codeql/build-options-for-compiled-languages
+          # "preferred" mirrors what GitHub Default setup selects for that language.
+          support='{
+            "actions":               {"modes":["none"],             "preferred":"none"},
+            "javascript-typescript": {"modes":["none"],             "preferred":"none"},
+            "python":                {"modes":["none"],             "preferred":"none"},
+            "ruby":                  {"modes":["none"],             "preferred":"none"},
+            "c-cpp":                 {"modes":["none","autobuild"], "preferred":"none"},
+            "csharp":                {"modes":["none","autobuild"], "preferred":"none"},
+            "java-kotlin":           {"modes":["none","autobuild"], "preferred":"none"},
+            "rust":                  {"modes":["none"],             "preferred":"none"},
+            "go":                    {"modes":["autobuild"],        "preferred":"autobuild"},
+            "swift":                 {"modes":["autobuild"],        "preferred":"autobuild"}
+          }'
+
+          result=$(jq -c -n \
+            --argjson raw "$LANGUAGES" \
+            --argjson support "$support" \
+            --arg defaultMode "$DEFAULT_BUILD_MODE" \
+            --arg defaultRunsOn "$DEFAULT_RUNS_ON" '
+            def entries:
+              map(
+                if   type == "string" then {language: ., mode: null, runner: null}
+                elif type == "object" then {language: .language, mode: .["build-mode"], runner: .["runs-on"]}
+                else {language: null, mode: null, runner: null}
+                end
+              );
+
+            def resolve($support; $defaultMode; $defaultRunsOn):
+              map(
+                . as $e
+                | ($support[$e.language // ""] // null) as $s
+                | if $s == null then
+                    { leg: null, note: null,
+                      err: "unsupported language \($e.language // "null" | tojson). Valid values: \($support | keys | sort | join(", "))" }
+                  elif $e.mode == "manual" then
+                    { leg: null, note: null,
+                      err: "\($e.language): build-mode manual is not supported by this reusable workflow (it needs repo-specific build steps). Use a standalone advanced CodeQL workflow." }
+                  elif ($e.mode != null and ($s.modes | index($e.mode)) == null) then
+                    { leg: null, note: null,
+                      err: "\($e.language): CodeQL does not support build-mode \($e.mode | tojson) for this language. Supported: \($s.modes | join(", "))." }
+                  else
+                    ( if   $e.mode != null                          then $e.mode
+                      elif ($s.modes | index($defaultMode)) != null then $defaultMode
+                      else $s.preferred end ) as $mode
+                    | ($e.runner // $defaultRunsOn) as $runner
+                    | { leg: { language: $e.language, buildMode: $mode, runsOn: $runner },
+                        note: ( if $e.mode == null and $mode != $defaultMode
+                                then "\($e.language): build-mode \($defaultMode | tojson) is not available for this language; resolved to \($mode | tojson)."
+                                else null end ),
+                        err: null }
+                  end
+              );
+
+            if ($raw | type) != "array" then
+              { matrix: null, notices: [], errors: ["languages must be a JSON array, for example [\"actions\",\"python\"]"] }
+            elif ($raw | length) == 0 then
+              { matrix: null, notices: [], errors: ["languages is empty — pass at least one CodeQL language"] }
+            else
+                ($raw | entries) as $es
+              | ($es | resolve($support; $defaultMode; $defaultRunsOn)) as $r
+              | ( $es | map(.language) | group_by(.) | map(select(length > 1) | .[0])
+                  | map("duplicate language \(. | tojson) — each language may appear once, or the legs race publishing the same SARIF category") ) as $dupes
+              | ( $r | map(select(.leg != null and .leg.language == "swift" and ((.leg.runsOn | ascii_downcase | test("mac")) | not)))
+                  | map("swift is analyzed on macOS only; runs-on \(.leg.runsOn | tojson) does not look like a macOS runner") ) as $swift
+              | { matrix:  { include: ($r | map(.leg) | map(select(. != null))) },
+                  notices: (($r | map(.note) | map(select(. != null))) + $swift),
+                  errors:  (($r | map(.err)  | map(select(. != null))) + $dupes) }
+            end
+          ')
+
+          while IFS= read -r note; do
+            [ -n "$note" ] && echo "::notice::${note}"
+          done < <(printf '%s' "$result" | jq -r '.notices[]?')
+
+          errors=$(printf '%s' "$result" | jq -r '.errors[]?')
+          if [ -n "$errors" ]; then
+            while IFS= read -r err; do
+              echo "::error::${err}"
+            done <<< "$errors"
+            exit 1
+          fi
+
+          matrix=$(printf '%s' "$result" | jq -c '.matrix')
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### CodeQL language matrix"
+            echo
+            echo "| Language | Build mode | Runner |"
+            echo "|---|---|---|"
+            printf '%s' "$matrix" | jq -r '.include[] | "| `\(.language)` | `\(.buildMode)` | `\(.runsOn)` |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   analyze:
     name: CodeQL (${{ matrix.language }})
-    runs-on: ${{ inputs.runs-on }}
+    needs: resolve
+    runs-on: ${{ matrix.runsOn }}
     strategy:
       fail-fast: false
-      matrix:
-        language: ${{ fromJSON(inputs.languages) }}
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -83,14 +210,14 @@ jobs:
         uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
         with:
           languages: ${{ matrix.language }}
-          build-mode: ${{ inputs.build-mode }}
+          build-mode: ${{ matrix.buildMode }}
           queries: ${{ inputs.queries }}
           packs: ${{ inputs.packs }}
           config-file: ${{ inputs.config-file }}
 
-      # Runs only when build-mode is autobuild; a no-op for none/other modes.
+      # Runs only when this leg resolved to autobuild; a no-op for none.
       - name: Autobuild
-        if: ${{ inputs.build-mode == 'autobuild' }}
+        if: ${{ matrix.buildMode == 'autobuild' }}
         uses: github/codeql-action/autobuild@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
 
       - name: Perform CodeQL Analysis

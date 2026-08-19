@@ -144,29 +144,42 @@ Scan-specific prerequisites:
 - **Runner toolchain.** `build-mode: none` needs no toolchain. `build-mode: autobuild` needs the language's build tools.
 - **Rollout alerts-first.** Enable without a merge gate, triage the backlog, then enforce via branch protection — turning enforcement on fleet-wide on day one lights every repo red.
 
-Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `ubuntu-latest`), `build-mode` (default `none`), `queries` (default `security-extended`), `packs`, `config-file`.
+Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `ubuntu-latest`), `build-mode` (default `none`), `resolve-runs-on` (default `ubuntu-latest`), `queries` (default `security-extended`), `packs`, `config-file`.
 
 #### Accepted `languages` values
 
-`languages` takes CodeQL's supported languages. Anything else fails at CodeQL init.
+`languages` takes CodeQL's supported languages. Anything else fails validation before any scan starts.
 
-| Value | Covers |
-|---|---|
-| `actions` | GitHub Actions workflows |
-| `c-cpp` | C, C++ |
-| `csharp` | C# |
-| `go` | Go |
-| `java-kotlin` | Java, Kotlin |
-| `javascript-typescript` | JavaScript, TypeScript |
-| `python` | Python |
-| `ruby` | Ruby |
-| `rust` | Rust |
-| `swift` | Swift |
+| Value | Covers | Buildless (`none`) | Resolved mode by default |
+|---|---|---|---|
+| `actions` | GitHub Actions workflows | yes | `none` |
+| `c-cpp` | C, C++ | yes | `none` |
+| `csharp` | C# | yes | `none` |
+| `go` | Go | **no** | `autobuild` |
+| `java-kotlin` | Java, Kotlin | Java only — **Kotlin needs a build** | `none` |
+| `javascript-typescript` | JavaScript, TypeScript | yes | `none` |
+| `python` | Python | yes | `none` |
+| `ruby` | Ruby | yes | `none` |
+| `rust` | Rust | yes — **only** `none` | `none` |
+| `swift` | Swift | **no** (and macOS runners only) | `autobuild` |
 
-Two gaps to plan around:
+**You do not have to work this table out yourself.** The workflow resolves a build mode per language, mirroring what GitHub Default setup picks,
+so languages with incompatible requirements can be combined in one call: `'["go","rust"]'` is valid even though Go rejects `none` and Rust accepts
+nothing else. Each substitution is reported as a notice in the job log, and the resolved matrix is written to the job summary.
+
+`build-mode` sets your *preference*, applied wherever the language supports it. For exact control, use the object form of an entry:
+
+```yaml
+sast-languages: '[{"language":"c-cpp","build-mode":"autobuild"},{"language":"swift","runs-on":"macos-14"},"rust"]'
+```
+
+An explicit per-language `build-mode` that CodeQL does not support is an error, not a silent substitution — the run fails in the resolver with the offending
+pair named, before any analysis starts. `manual` is rejected everywhere: a reusable workflow cannot carry repo-specific build steps.
+
+Two coverage gaps to plan around:
 
 - **No shell analyzer.** CodeQL cannot analyze Bash or other shell. Cover shell with a linter such as [`shellcheck`](https://www.shellcheck.net/), typically at pre-commit.
-- **No CUDA analyzer.** The `c-cpp` extractor does not understand CUDA, so `.cu` / `.cuh` device code is not analyzed. A CUDA-heavy repository gets coverage only of its host-side translation units, and a useful C/C++ database usually needs `build-mode: autobuild` plus the full toolchain — price that build before enabling `c-cpp`.
+- **No CUDA analyzer.** The `c-cpp` extractor does not understand CUDA, so `.cu` / `.cuh` device code is not analyzed. A CUDA-heavy repository pays full C/C++ extraction cost for coverage of its host-side translation units only — measure that trade before enabling `c-cpp`.
 
 Every entry is its own matrix leg, so scan cost scales with the list. Start with the languages carrying the most risk, then widen once you have a runtime and alert-volume baseline.
 
