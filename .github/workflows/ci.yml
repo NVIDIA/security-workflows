@@ -290,9 +290,128 @@ jobs:
       security-events: write
     uses: ./.github/workflows/security-suite.yml
 
+  # SAST resolver — contract tests for the language matrix.
+  #
+  # Runs the resolver extracted from sast-scan-codeql.yml itself, so the tests exercise the shipped script rather than a copy that can drift.
+  # Covers what a live scan cannot: build modes this repo has no sources for (go, rust, swift), and the rejection paths, whose expected outcome is a non-zero exit
+  # Asserting them here keeps the run green, matching how the Pulse negatives above are shaped.
+  # ============================================================================
+  sast-resolver-contract:
+    name: SAST resolver — contract tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Extract the resolver from sast-scan-codeql.yml
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import os, pathlib, yaml
+          workflow = yaml.safe_load(pathlib.Path(".github/workflows/sast-scan-codeql.yml").read_text())
+          script = workflow["jobs"]["resolve"]["steps"][0]["run"]
+          pathlib.Path(os.environ["RUNNER_TEMP"], "resolve.sh").write_text(script)
+          PY
+          test -s "$RUNNER_TEMP/resolve.sh"
+
+      - name: Assert resolved matrices and rejections
+        env:
+          RESOLVER: ${{ runner.temp }}/resolve.sh
+        run: |
+          set -uo pipefail
+          failures=0
+
+          # run <languages> <default-build-mode> -> sets $code and $matrix.
+          # `|| code=$?` is required: Actions runs this step under `bash -e`, and the rejection
+          # cases below expect the resolver to exit non-zero, which would otherwise abort the step.
+          run_case() {
+            : > "$RUNNER_TEMP/out.txt"
+            code=0
+            LANGUAGES="$1" DEFAULT_BUILD_MODE="$2" DEFAULT_RUNS_ON=ubuntu-latest \
+              GITHUB_OUTPUT="$RUNNER_TEMP/out.txt" GITHUB_STEP_SUMMARY=/dev/null \
+              bash "$RESOLVER" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+            matrix=$(sed -n 's/^matrix=//p' "$RUNNER_TEMP/out.txt")
+          }
+
+          expect_ok() {
+            local name="$1" langs="$2" mode="$3" want="$4"
+            run_case "$langs" "$mode"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected success, exited ${code}"; cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            if ! diff -q <(printf '%s' "$matrix" | jq -S .) <(printf '%s' "$want" | jq -S .) >/dev/null; then
+              echo "::error::${name}: matrix mismatch"
+              echo "  want: $(printf '%s' "$want" | jq -Sc .)"
+              echo "  got:  $(printf '%s' "$matrix" | jq -Sc .)"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name}"
+          }
+
+          expect_rejected() {
+            local name="$1" langs="$2" mode="$3"
+            run_case "$langs" "$mode"
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the resolver to reject this, but it succeeded"; failures=$((failures+1)); return
+            fi
+            if ! grep -q '::error::' "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${name}: failed without an actionable ::error:: message"; failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} — $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt" | sed 's/^::error:://')"
+          }
+
+          leg() { printf '{"language":"%s","buildMode":"%s","runsOn":"%s"}' "$1" "$2" "${3:-ubuntu-latest}"; }
+
+          expect_ok "string array stays back-compatible" \
+            '["actions","python"]' none \
+            "{\"include\":[$(leg actions none),$(leg python none)]}"
+
+          expect_ok "go is promoted to autobuild, rust stays none" \
+            '["go","rust"]' none \
+            "{\"include\":[$(leg go autobuild),$(leg rust none)]}"
+
+          expect_ok "rust is demoted from a global autobuild preference" \
+            '["c-cpp","rust"]' autobuild \
+            "{\"include\":[$(leg c-cpp autobuild),$(leg rust none)]}"
+
+          expect_ok "explicit per-language build-mode is honoured" \
+            '[{"language":"c-cpp","build-mode":"autobuild"},"python"]' none \
+            "{\"include\":[$(leg c-cpp autobuild),$(leg python none)]}"
+
+          expect_ok "per-language runs-on reaches the leg" \
+            '[{"language":"swift","runs-on":"macos-14"}]' none \
+            "{\"include\":[$(leg swift autobuild macos-14)]}"
+
+          expect_ok "java-kotlin defaults to none like GitHub default setup" \
+            '["java-kotlin"]' none \
+            "{\"include\":[$(leg java-kotlin none)]}"
+
+          expect_rejected "unknown language"                  '["bash"]' none
+          expect_rejected "rust with an explicit autobuild"    '[{"language":"rust","build-mode":"autobuild"}]' none
+          expect_rejected "manual build-mode"                  '[{"language":"go","build-mode":"manual"}]' none
+          expect_rejected "duplicate language"                 '["python","python"]' none
+          expect_rejected "empty language list"                '[]' none
+          expect_rejected "malformed JSON"                     '["python"' none
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} resolver contract case(s) failed"
+            exit 1
+          fi
+          echo "All resolver contract cases passed."
+
   # SAST (CodeQL) — self test the reusable workflow on this repo's own sources.
   # This repo is workflows + shell, so the relevant CodeQL language is "actions".
-  # Alerts-first: analyze uploads to code scanning; it does not fail on findings.
+  # Uses the object entry form so the parsing path a plain string array never reaches is covered end to end.
+  # Only "actions" is analyzed: an org Security Configuration already runs CodeQL default setup for python on this repo, and analyzing it here too would
+  # publish a second /language:python analysis for the same commit.
   # ============================================================================
   sast-codeql-dogfood:
     name: SAST (CodeQL) — self test
@@ -302,5 +421,5 @@ jobs:
       security-events: write
     uses: ./.github/workflows/sast-scan-codeql.yml
     with:
-      languages: '["actions"]'
+      languages: '[{"language":"actions","build-mode":"none"}]'
       runs-on: ubuntu-latest

@@ -9,7 +9,9 @@
 # PREREQUISITES for a consuming repository:
 #   * Public repos: code scanning is free — no GHAS license required.
 #   * Private/internal repos: GitHub Advanced Security (Code Security) MUST be enabled or CodeQL SARIF upload is rejected.
-#   * CodeQL "Default setup" MUST be OFF on the repo — Default setup and an advanced/reusable workflow are mutually exclusive.
+#   * CodeQL "Default setup" MUST NOT cover a language this workflow analyzes — both publish the
+#     /language:<lang> SARIF category, so an overlap makes the two uploads collide. Default setup covering
+#     only other languages can coexist with this workflow.
 #   * A language analyzed with build-mode autobuild needs its toolchain on the runner; build-mode none needs none.
 #     GitHub-hosted runners ship the common toolchains; self-hosted images may not.
 

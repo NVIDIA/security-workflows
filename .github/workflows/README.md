@@ -140,7 +140,7 @@ Use `sast-scan-codeql.yml` only when you actually need the customization. If you
 Scan-specific prerequisites:
 
 - **Licensing.** Public repos get code scanning free. Private/internal repos require GitHub Advanced Security (Code Security).
-- **Default setup must be off.** Default setup and an advanced/reusable CodeQL workflow are mutually exclusive; if Default setup is on, this workflow's upload fails.
+- **Default setup must not cover the same languages.** Default setup and this workflow both publish the `/language:<lang>` SARIF category, so any language covered by both makes the two uploads collide. Default setup covering *other* languages is fine and common — this repository runs exactly that way, with an org Security Configuration analyzing `python` while the self-test analyzes `actions`.
 - **Runner toolchain.** `build-mode: none` needs no toolchain. `build-mode: autobuild` needs the language's build tools.
 - **Rollout alerts-first.** Enable without a merge gate, triage the backlog, then enforce via branch protection — turning enforcement on fleet-wide on day one lights every repo red.
 

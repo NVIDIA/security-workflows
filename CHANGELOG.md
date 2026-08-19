@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Documentation — `build-mode` was described as working "for every language": `go` and `swift` reject `none`, Kotlin requires `autobuild`, and `rust` supports only `none`.
+- Documentation — the CodeQL prerequisite said Default setup must be off entirely. The conflict is per language: both publish `/language:<lang>`, so only an overlap collides. Default setup on other languages can coexist, as it already does on this repository.
 - Documentation — the catalogue gave CodeQL's `runs-on` default as `linux-amd64-cpu4` (actual: `ubuntu-latest`) and required an `nv-gha-runners` label for every workflow, which does not apply to CodeQL.
 
 ## [0.3.0] - 2026-08-11
