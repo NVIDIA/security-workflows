@@ -4,7 +4,11 @@
 # Security Workflows — SAST (CodeQL) reusable workflow.
 #
 # SCOPE: For most repositories, enable CodeQL via GitHub "Default setup" applied through an org/enterprise Security Configuration (zero YAML, GitHub-managed upgrades).
-# Use THIS reusable workflow only when a repo needs custom query packs, path filtering, a shared build step, or a centrally-pinned CodeQL action.
+# Use THIS reusable workflow only when a repo needs path filtering, a non-default query suite, or a centrally-pinned CodeQL action.
+# It cannot carry a repo-specific build (build-mode manual is rejected) — a repo needing one wants a standalone advanced workflow.
+#
+# SCOPE OF ENFORCEMENT: this workflow publishes findings to code scanning and always exits 0. It never fails a pull request.
+# Gating is configured outside it, through code-scanning alert rules / branch protection on the consuming repository.
 #
 # PREREQUISITES for a consuming repository:
 #   * Public repos: code scanning is free — no GHAS license required.
@@ -62,7 +66,9 @@ on:
         default: security-extended
       packs:
         description: >-
-          Optional CodeQL query packs (comma-separated). Pulling packs from GHCR may require the caller to also grant packages: read.
+          Optional CodeQL query packs (comma-separated). Packs hosted on GHCR are NOT usable today: this workflow does not declare
+          packages: read, and a called workflow's token cannot exceed what it declares, so granting the scope in the caller has no effect.
+          Adding the scope would force every existing caller to grant it too, which is a major version bump.
         type: string
         required: false
         default: ''
@@ -123,9 +129,10 @@ jobs:
             --arg defaultRunsOn "$DEFAULT_RUNS_ON" '
             def entries:
               map(
-                if   type == "string" then {language: ., mode: null, runner: null}
-                elif type == "object" then {language: .language, mode: .["build-mode"], runner: .["runs-on"]}
-                else {language: null, mode: null, runner: null}
+                if   type == "string" then {language: ., mode: null, runner: null, unknown: []}
+                elif type == "object" then {language: .language, mode: .["build-mode"], runner: .["runs-on"],
+                                            unknown: (keys - ["language", "build-mode", "runs-on"])}
+                else {language: null, mode: null, runner: null, unknown: []}
                 end
               );
 
@@ -133,7 +140,10 @@ jobs:
               map(
                 . as $e
                 | ($support[$e.language // ""] // null) as $s
-                | if $s == null then
+                | if ($e.unknown | length) > 0 then
+                    { leg: null, note: null,
+                      err: "\($e.language // "entry"): unrecognized key(s) \($e.unknown | join(", ")) — an object entry accepts only language, build-mode and runs-on. A misspelled key would otherwise be ignored silently." }
+                  elif $s == null then
                     { leg: null, note: null,
                       err: "unsupported language \($e.language // "null" | tojson). Valid values: \($support | keys | sort | join(", "))" }
                   elif $e.mode == "manual" then

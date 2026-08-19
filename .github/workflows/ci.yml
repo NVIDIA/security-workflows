@@ -400,6 +400,8 @@ jobs:
           expect_rejected "duplicate language"                 '["python","python"]' none
           expect_rejected "empty language list"                '[]' none
           expect_rejected "malformed JSON"                     '["python"' none
+          expect_rejected "misspelled build-mode key"          '[{"language":"go","buildMode":"none"}]' none
+          expect_rejected "misspelled runs-on key"             '[{"language":"swift","runsOn":"macos-14"}]' none
 
           if [ "$failures" -ne 0 ]; then
             echo "::error::${failures} resolver contract case(s) failed"

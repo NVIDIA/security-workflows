@@ -132,7 +132,7 @@ jobs:
 | Model | Use for | How |
 |---|---|---|
 | **Default setup** (Security Configuration) | The vast majority of repos | Org/enterprise owner enables it centrally; no file in the repo |
-| **This reusable workflow** | Repos needing custom query packs, path filters, a shared build step, or a centrally-pinned action | Add a caller (below) |
+| **This reusable workflow** | Repos needing path filters, a non-default query suite, or a centrally-pinned action | Add a caller (below) |
 | **Standalone advanced** | Rare repos with a bespoke, non-generalizable build | Repo-local `codeql.yml` |
 
 Use `sast-scan-codeql.yml` only when you actually need the customization. If you don't, use Default setup.
@@ -142,7 +142,9 @@ Scan-specific prerequisites:
 - **Licensing.** Public repos get code scanning free. Private/internal repos require GitHub Advanced Security (Code Security).
 - **Default setup must not cover the same languages.** Default setup and this workflow both publish the `/language:<lang>` SARIF category, so any language covered by both makes the two uploads collide. Default setup covering *other* languages is fine and common — this repository runs exactly that way, with an org Security Configuration analyzing `python` while the self-test analyzes `actions`.
 - **Runner toolchain.** `build-mode: none` needs no toolchain. `build-mode: autobuild` needs the language's build tools.
-- **Rollout alerts-first.** Enable without a merge gate, triage the backlog, then enforce via branch protection — turning enforcement on fleet-wide on day one lights every repo red.
+- **This workflow never fails a pull request.** It publishes findings to code scanning and always exits 0 — there is no `failure_policy` equivalent, unlike [`secret-scan-pulse.yml`](secret-scan-pulse.yml). Enabling it buys visibility, not a merge gate. Gating is a separate, repository-side decision: configure it through code-scanning alert rules and branch protection once the backlog is triaged. Plan the rollout that way deliberately — turning enforcement on fleet-wide on day one lights every repo red.
+- **`queries` defaults to `security-extended`, which is broader than Default setup's `default` suite.** Expect a larger initial backlog than an equivalent Default-setup repo, and name a triage owner before enabling. Pass `queries: default` to match Default setup's volume.
+- **GHCR-hosted query `packs` are not usable.** The workflow does not declare `packages: read` and a called workflow's token cannot exceed what it declares, so granting the scope in the caller has no effect.
 
 Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `ubuntu-latest`), `build-mode` (default `none`), `resolve-runs-on` (default `ubuntu-latest`), `queries` (default `security-extended`), `packs`, `config-file`.
 
