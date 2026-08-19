@@ -40,7 +40,8 @@ on:
         default: false
       suite-runs-on:
         description: >-
-          Runner for the suite's preflight job.
+          Runner for the suite's short helper jobs — the preflight check and the CodeQL language-matrix resolver.
+          Set this only if the repository cannot use GitHub-hosted runners.
         type: string
         required: false
         default: ubuntu-latest
@@ -58,21 +59,24 @@ on:
         default: unverified
       sast-languages:
         description: >-
-          JSON array of CodeQL languages, for example '["actions"]'.
-          Accepted values: actions, c-cpp, csharp, go, java-kotlin, javascript-typescript, python, ruby, rust, swift
-          — see sast-scan-codeql.yml for per-language caveats.
+          JSON array of CodeQL languages, for example '["actions","python"]'.
+          Entries may also be objects carrying per-language overrides: '[{"language":"go","build-mode":"autobuild"},"rust"]'.
+          Accepted values: actions, c-cpp, csharp, go, java-kotlin, javascript-typescript, python, ruby, rust, swift.
+          Each language's build mode is resolved automatically, so languages with incompatible requirements can be combined — see sast-scan-codeql.yml for per-language caveats.
           Required when enable-sast-scan is true; ignored otherwise.
         type: string
         required: false
         default: ''
       sast-runs-on:
-        description: Runner label for the CodeQL SAST scan.
+        description: >-
+          Default runner label for the CodeQL analysis. Override per language with the object form of sast-languages.
         type: string
         required: false
         default: ubuntu-latest
       sast-build-mode:
         description: >-
-          CodeQL build mode: none (default) or autobuild.
+          Preferred CodeQL build mode: none (default) or autobuild. Applied to every language that supports it;
+          a language that cannot honour it resolves to the mode CodeQL does support and reports the substitution.
         type: string
         required: false
         default: none
@@ -138,5 +142,6 @@ jobs:
       languages: ${{ inputs.sast-languages }}
       runs-on: ${{ inputs.sast-runs-on }}
       build-mode: ${{ inputs.sast-build-mode }}
+      resolve-runs-on: ${{ inputs.suite-runs-on }}
       queries: ${{ inputs.sast-queries }}
       config-file: ${{ inputs.sast-config-file }}

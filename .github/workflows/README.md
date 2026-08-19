@@ -132,7 +132,7 @@ jobs:
 | Model | Use for | How |
 |---|---|---|
 | **Default setup** (Security Configuration) | The vast majority of repos | Org/enterprise owner enables it centrally; no file in the repo |
-| **This reusable workflow** | Repos needing custom query packs, path filters, a shared build step, or a centrally-pinned action | Add a caller (below) |
+| **This reusable workflow** | Repos needing path filters, a non-default query suite, or a centrally-pinned action | Add a caller (below) |
 | **Standalone advanced** | Rare repos with a bespoke, non-generalizable build | Repo-local `codeql.yml` |
 
 Use `sast-scan-codeql.yml` only when you actually need the customization. If you don't, use Default setup.
@@ -140,33 +140,48 @@ Use `sast-scan-codeql.yml` only when you actually need the customization. If you
 Scan-specific prerequisites:
 
 - **Licensing.** Public repos get code scanning free. Private/internal repos require GitHub Advanced Security (Code Security).
-- **Default setup must be off.** Default setup and an advanced/reusable CodeQL workflow are mutually exclusive; if Default setup is on, this workflow's upload fails.
+- **Default setup must not cover the same languages.** Default setup and this workflow both publish the `/language:<lang>` SARIF category, so any language covered by both makes the two uploads collide. Default setup covering *other* languages is fine and common — this repository runs exactly that way, with an org Security Configuration analyzing `python` while the self-test analyzes `actions`.
 - **Runner toolchain.** `build-mode: none` needs no toolchain. `build-mode: autobuild` needs the language's build tools.
-- **Rollout alerts-first.** Enable without a merge gate, triage the backlog, then enforce via branch protection — turning enforcement on fleet-wide on day one lights every repo red.
+- **This workflow never fails a pull request.** It publishes findings to code scanning and always exits 0 — there is no `failure_policy` equivalent, unlike [`secret-scan-pulse.yml`](secret-scan-pulse.yml). Enabling it buys visibility, not a merge gate. Gating is a separate, repository-side decision: configure it through code-scanning alert rules and branch protection once the backlog is triaged. Plan the rollout that way deliberately — turning enforcement on fleet-wide on day one lights every repo red.
+- **`queries` defaults to `security-extended`, which is broader than Default setup's `default` suite.** Expect a larger initial backlog than an equivalent Default-setup repo, and name a triage owner before enabling. Pass `queries: default` to match Default setup's volume.
+- **GHCR-hosted query `packs` are not usable.** The workflow does not declare `packages: read` and a called workflow's token cannot exceed what it declares, so granting the scope in the caller has no effect.
 
-Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `ubuntu-latest`), `build-mode` (default `none`), `queries` (default `security-extended`), `packs`, `config-file`.
+Key inputs: `languages` (required, JSON array — one matrix leg per entry), `runs-on` (default `ubuntu-latest`), `build-mode` (default `none`), `resolve-runs-on` (default `ubuntu-latest`), `queries` (default `security-extended`), `packs`, `config-file`.
 
 #### Accepted `languages` values
 
-`languages` takes CodeQL's supported languages. Anything else fails at CodeQL init.
+`languages` takes CodeQL's supported languages. Anything else fails validation before any scan starts.
 
-| Value | Covers |
-|---|---|
-| `actions` | GitHub Actions workflows |
-| `c-cpp` | C, C++ |
-| `csharp` | C# |
-| `go` | Go |
-| `java-kotlin` | Java, Kotlin |
-| `javascript-typescript` | JavaScript, TypeScript |
-| `python` | Python |
-| `ruby` | Ruby |
-| `rust` | Rust |
-| `swift` | Swift |
+| Value | Covers | Buildless (`none`) | Resolved mode by default |
+|---|---|---|---|
+| `actions` | GitHub Actions workflows | yes | `none` |
+| `c-cpp` | C, C++ | yes | `none` |
+| `csharp` | C# | yes | `none` |
+| `go` | Go | **no** | `autobuild` |
+| `java-kotlin` | Java, Kotlin | Java only — **Kotlin needs a build** | `none` |
+| `javascript-typescript` | JavaScript, TypeScript | yes | `none` |
+| `python` | Python | yes | `none` |
+| `ruby` | Ruby | yes | `none` |
+| `rust` | Rust | yes — **only** `none` | `none` |
+| `swift` | Swift | **no** (and macOS runners only) | `autobuild` |
 
-Two gaps to plan around:
+**You do not have to work this table out yourself.** The workflow resolves a build mode per language, mirroring what GitHub Default setup picks,
+so languages with incompatible requirements can be combined in one call: `'["go","rust"]'` is valid even though Go rejects `none` and Rust accepts
+nothing else. Each substitution is reported as a notice in the job log, and the resolved matrix is written to the job summary.
+
+`build-mode` sets your *preference*, applied wherever the language supports it. For exact control, use the object form of an entry:
+
+```yaml
+sast-languages: '[{"language":"c-cpp","build-mode":"autobuild"},{"language":"swift","runs-on":"macos-14"},"rust"]'
+```
+
+An explicit per-language `build-mode` that CodeQL does not support is an error, not a silent substitution — the run fails in the resolver with the offending
+pair named, before any analysis starts. `manual` is rejected everywhere: a reusable workflow cannot carry repo-specific build steps.
+
+Two coverage gaps to plan around:
 
 - **No shell analyzer.** CodeQL cannot analyze Bash or other shell. Cover shell with a linter such as [`shellcheck`](https://www.shellcheck.net/), typically at pre-commit.
-- **No CUDA analyzer.** The `c-cpp` extractor does not understand CUDA, so `.cu` / `.cuh` device code is not analyzed. A CUDA-heavy repository gets coverage only of its host-side translation units, and a useful C/C++ database usually needs `build-mode: autobuild` plus the full toolchain — price that build before enabling `c-cpp`.
+- **No CUDA analyzer.** The `c-cpp` extractor does not understand CUDA, so `.cu` / `.cuh` device code is not analyzed. A CUDA-heavy repository pays full C/C++ extraction cost for coverage of its host-side translation units only — measure that trade before enabling `c-cpp`.
 
 Every entry is its own matrix leg, so scan cost scales with the list. Start with the languages carrying the most risk, then widen once you have a runtime and alert-volume baseline.
 

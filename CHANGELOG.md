@@ -6,13 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+> Target: **0.4.0** — additive; existing callers need no change.
+
 ### Added
 
-- Documentation — the accepted `languages` / `sast-languages` values are now listed in the [workflow catalogue](.github/workflows/README.md#accepted-languages-values), with the two coverage gaps consumers hit first: CodeQL has no shell analyzer (cover Bash with `shellcheck`) and no CUDA analyzer (`c-cpp` skips `.cu` / `.cuh` device code). The list previously existed only in the `sast-scan-codeql.yml` input description, so callers could not find it from the repository's documentation.
+- SAST (CodeQL) — build mode is resolved per language instead of one value applied to every matrix leg, so sets with conflicting requirements work in a single call. `'["go","rust"]'` could not previously be expressed (`go` needs `autobuild`, `rust` supports only `none`). Substitutions are reported as job-log notices and the resolved matrix is written to the job summary.
+- SAST (CodeQL) — `languages` entries may be objects carrying a per-language `build-mode` or `runs-on`: `'[{"language":"swift","runs-on":"macos-14"},"rust"]'`. Per-entry `runs-on` makes `swift` usable, as it requires a macOS runner.
+- SAST (CodeQL) — a `resolve` job validates the language set before any analysis starts, rejecting unknown languages, `manual` mode, unsupported explicit modes, duplicate languages, malformed JSON, and empty lists. New `resolve-runs-on` input (default `ubuntu-latest`); the suite passes `suite-runs-on` through to it.
+- Documentation — the [workflow catalogue](.github/workflows/README.md#accepted-languages-values) now lists the accepted `languages` values with per-language buildless support, plus the two coverage gaps: no shell analyzer (use `shellcheck`) and no CUDA analyzer (`c-cpp` skips `.cu` / `.cuh`).
+
+### Changed
+
+- SAST (CodeQL) — `build-mode` is now a preference applied where the language supports it; an explicit per-language mode is exact and errors if CodeQL rejects it. No existing caller changes behaviour.
+- SAST (CodeQL) — the `analyze` job keeps the name `CodeQL (<language>)`, so required status checks still match. A new non-required check, `Resolve language matrix`, appears alongside it.
 
 ### Fixed
 
-- Documentation — the workflow catalogue gave the CodeQL `runs-on` default as `linux-amd64-cpu4`; the workflow defaults to `ubuntu-latest`. The catalogue's shared runner rule also stated that every workflow needs an `nv-gha-runners` label, which is untrue for CodeQL — it reaches no NVIDIA-internal service. The `runs-on` input description in [`sast-scan-codeql.yml`](.github/workflows/sast-scan-codeql.yml) carried the same contradiction.
+- Documentation — `build-mode` was described as working "for every language": `go` and `swift` reject `none`, Kotlin requires `autobuild`, and `rust` supports only `none`.
+- Documentation — the CodeQL prerequisite said Default setup must be off entirely. The conflict is per language: both publish `/language:<lang>`, so only an overlap collides. Default setup on other languages can coexist, as it already does on this repository.
+- Documentation — the catalogue gave CodeQL's `runs-on` default as `linux-amd64-cpu4` (actual: `ubuntu-latest`) and required an `nv-gha-runners` label for every workflow, which does not apply to CodeQL.
 
 ## [0.3.0] - 2026-08-11
 
