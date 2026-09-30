@@ -31,6 +31,13 @@ on:
         type: boolean
         required: false
         default: false
+      enable-vuln-scan:
+        description: >-
+          Run the Pulse OSS vulnerability scan (vuln-scan-pulse-oss.yml). Off by default.
+          Requires self-hosted nv-gha-runners and an nSpect registration — set nspect-id when you do.
+        type: boolean
+        required: false
+        default: false
       enable-sast-scan:
         description: >-
           Run the CodeQL SAST scan (sast-scan-codeql.yml). Off by default.
@@ -45,6 +52,16 @@ on:
         type: string
         required: false
         default: ubuntu-latest
+      nspect-id:
+        description: >-
+          nSpect ID for the calling repository (NSPECT-xxxx-xxxx), normally passed from the
+          vars.NSPECT_ID repository variable. Carries no scan prefix because an nSpect ID
+          belongs to the repository rather than to one scan — every scan here that reports to
+          nSpect reads this one input.
+          Required when enable-vuln-scan is true; ignored otherwise.
+        type: string
+        required: false
+        default: ''
       secret-runs-on:
         description: Runner label for the Pulse secret scan (an nv-gha-runners label).
         type: string
@@ -57,6 +74,57 @@ on:
         type: string
         required: false
         default: unverified
+      vuln-registered-branch:
+        description: Default or release branch registered in nSpect.
+        type: string
+        required: false
+        default: main
+      vuln-runs-on:
+        description: Runner label for the Pulse OSS vulnerability scan (an nv-gha-runners label).
+        type: string
+        required: false
+        default: linux-amd64-cpu4
+      vuln-scan-path:
+        description: Repository-relative directory to scan.
+        type: string
+        required: false
+        default: .
+      vuln-scan-mode:
+        description: >-
+          Scan family to run: auto (default), persistent, or rapid.
+          See vuln-scan-pulse-oss.yml for the full mode semantics.
+        type: string
+        required: false
+        default: auto
+      vuln-build:
+        description: >-
+          Enable scanner build mode, for ecosystems whose dependency graph is only resolvable
+          through a build (Maven, Go).
+        type: boolean
+        required: false
+        default: false
+      vuln-failure-policy:
+        description: >-
+          Pulse OSS finding policy: report-only (default) or fail-on-vulnerability.
+          Scanner and transport errors fail the job under either value.
+        type: string
+        required: false
+        default: report-only
+      vuln-inventory-writeback:
+        description: Publish results to nSpect inventory (persistent scans only).
+        type: boolean
+        required: false
+        default: false
+      vuln-upload-report:
+        description: Upload the validated vulnerability report as a 3-day artifact.
+        type: boolean
+        required: false
+        default: false
+      vuln-timeout-seconds:
+        description: Scanner timeout in seconds (60-3600).
+        type: number
+        required: false
+        default: 1800
       sast-languages:
         description: >-
           JSON array of CodeQL languages, for example '["actions","python"]'.
@@ -98,23 +166,36 @@ jobs:
   preflight:
     name: Suite preflight
     if: >-
-      ${{ (!inputs.enable-secret-scan && !inputs.enable-sast-scan)
+      ${{ (!inputs.enable-secret-scan && !inputs.enable-vuln-scan && !inputs.enable-sast-scan)
+          || (inputs.enable-vuln-scan && inputs.nspect-id == '')
           || (inputs.enable-sast-scan && inputs.sast-languages == '') }}
     runs-on: ${{ inputs.suite-runs-on }}
     steps:
       - name: Report suite selection
         env:
           ENABLE_SECRET_SCAN: ${{ inputs.enable-secret-scan }}
+          ENABLE_VULN_SCAN: ${{ inputs.enable-vuln-scan }}
           ENABLE_SAST_SCAN: ${{ inputs.enable-sast-scan }}
+          NSPECT_ID: ${{ inputs.nspect-id }}
           SAST_LANGUAGES: ${{ inputs.sast-languages }}
         run: |
           set -euo pipefail
+          # Report every missing companion input before exiting, so a caller enabling two
+          # scans at once does not have to fix one, re-run, and discover the next.
+          failures=0
+          if [ "$ENABLE_VULN_SCAN" = "true" ] && [ -z "$NSPECT_ID" ]; then
+            echo "::error::enable-vuln-scan is true but nspect-id is empty. Pass the repository's nSpect ID from the vars.NSPECT_ID repository variable."
+            failures=$((failures + 1))
+          fi
           if [ "$ENABLE_SAST_SCAN" = "true" ] && [ -z "$SAST_LANGUAGES" ]; then
             echo "::error::enable-sast-scan is true but sast-languages is empty. Pass a JSON array of CodeQL languages, for example: sast-languages: '[\"actions\"]'."
+            failures=$((failures + 1))
+          fi
+          if [ "$failures" -ne 0 ]; then
             exit 1
           fi
-          if [ "$ENABLE_SECRET_SCAN" != "true" ] && [ "$ENABLE_SAST_SCAN" != "true" ]; then
-            echo "::warning::Security suite ran no scans — every enable-* input is false. Set enable-secret-scan and/or enable-sast-scan to true for this check to mean anything."
+          if [ "$ENABLE_SECRET_SCAN" != "true" ] && [ "$ENABLE_VULN_SCAN" != "true" ] && [ "$ENABLE_SAST_SCAN" != "true" ]; then
+            echo "::warning::Security suite ran no scans — every enable-* input is false. Set enable-secret-scan, enable-vuln-scan and/or enable-sast-scan to true for this check to mean anything."
           fi
 
   secret-scan:
@@ -129,6 +210,25 @@ jobs:
     with:
       runs-on: ${{ inputs.secret-runs-on }}
       failure_policy: ${{ inputs.secret-failure-policy }}
+
+  vuln-scan:
+    name: Vulnerability scan (Pulse OSS)
+    if: ${{ inputs.enable-vuln-scan && inputs.nspect-id != '' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/vuln-scan-pulse-oss.yml
+    with:
+      runs-on: ${{ inputs.vuln-runs-on }}
+      nspect_id: ${{ inputs.nspect-id }}
+      registered_branch: ${{ inputs.vuln-registered-branch }}
+      scan_path: ${{ inputs.vuln-scan-path }}
+      scan_mode: ${{ inputs.vuln-scan-mode }}
+      build: ${{ inputs.vuln-build }}
+      failure_policy: ${{ inputs.vuln-failure-policy }}
+      inventory_writeback: ${{ inputs.vuln-inventory-writeback }}
+      upload_report: ${{ inputs.vuln-upload-report }}
+      timeout_seconds: ${{ inputs.vuln-timeout-seconds }}
 
   sast-scan:
     name: SAST (CodeQL)
