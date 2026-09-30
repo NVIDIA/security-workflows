@@ -1,0 +1,804 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Security Workflows — Vulnerability Scan (Pulse OSS) reusable workflow.
+#
+# Runs the Pulse open source CLI from nvcr.io by immutable digest, reaching nSpect and the
+# vulnerability backend through the Charon application tunnel on loopback. GitHub OIDC is the
+# only identity presented — no SSA, service, or backend credential enters the job.
+#
+# The calling repository must have an nv-gha-runners grant and must see the Vault variables
+
+name: Vulnerability Scan (Pulse OSS)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label to run on (an nv-gha-runners label).
+        type: string
+        required: false
+        default: linux-amd64-cpu4
+      nspect_id:
+        description: >-
+          nSpect ID for the calling repository (NSPECT-xxxx-xxxx).
+          Supply it from the NSPECT_ID repository or repository variable.
+        type: string
+        required: true
+      registered_branch:
+        description: Default or release branch registered in nSpect.
+        type: string
+        required: false
+        default: main
+      scan_path:
+        description: Repository-relative directory to scan.
+        type: string
+        required: false
+        default: .
+      scan_mode:
+        description: >-
+          Scan family to run. Allowed:
+          - auto (default) — persistent on the registered branch, rapid everywhere else.
+          - persistent — creates or updates the project/version in the backend.
+          - rapid — reports findings without creating persistent state.
+        type: string
+        required: false
+        default: auto
+      build:
+        description: >-
+          Enable scanner build mode, for ecosystems whose dependency graph is only resolvable
+          through a build (Maven, Go).
+        type: boolean
+        required: false
+        default: false
+      failure_policy:
+        description: >-
+          Pipeline failure behavior on findings. The scan always produces the full report;
+          this input only decides whether findings fail the job. Allowed:
+          - report-only (default) — findings warn; scanner and transport errors still fail.
+          - fail-on-vulnerability — any reported finding fails the job.
+        type: string
+        required: false
+        default: report-only
+      inventory_writeback:
+        description: Publish results to nSpect inventory (persistent scans only).
+        type: boolean
+        required: false
+        default: false
+      upload_report:
+        description: Upload the validated vulnerability report as a 3-day artifact.
+        type: boolean
+        required: false
+        default: false
+      timeout_seconds:
+        description: Scanner timeout in seconds (60-3600).
+        type: number
+        required: false
+        default: 1800
+      ci_test_setup:
+        description: >-
+          CI self-test only. When true — and only when the caller is NVIDIA/security-workflows —
+          a disposable Maven fixture pinning a known-vulnerable dependency is written to
+          .pulse-oss-selftest/ in the checked-out tree, so the detection path can be exercised
+          end-to-end through this reusable workflow. Pass scan_path: .pulse-oss-selftest and
+          build: true alongside it. The fixture is generated at run time and never committed,
+          so this repository's own dependency graph stays clean.
+          It is inert in every other repository. Never enable in production consumers.
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      resolved_mode:
+        description: Scan family selected after applying auto behavior.
+        value: ${{ jobs.pulse-oss.outputs.resolved_mode }}
+      finding_count:
+        description: Number of findings in the validated report.
+        value: ${{ jobs.pulse-oss.outputs.finding_count }}
+      scanner_exit_code:
+        description: Scanner process exit code.
+        value: ${{ jobs.pulse-oss.outputs.scanner_exit_code }}
+
+permissions:
+  contents: read
+  id-token: write  # minted twice over: Vault for the registry, Charon for the scan
+
+jobs:
+  pulse-oss:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 75  # headroom above the 3600s maximum scanner timeout
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      resolved_mode: ${{ steps.contract.outputs.resolved_mode }}
+      finding_count: ${{ steps.report.outputs.finding_count }}
+      scanner_exit_code: ${{ steps.scanner.outputs.exit_code }}
+    env:
+      # Digest is its own variable so it can be rolled without a code change; a tag variable
+      # would be mutable, and a mutable reference is not a pin.
+      SCANNER_IMAGE_REF: ${{ vars.VULN_SCAN_PULSE_OSS_IMAGE }}@${{ vars.VULN_SCAN_PULSE_OSS_IMAGE_DIGEST }}
+      # vars resolves against the caller, so the image above is caller-supplied. This is not.
+      SCANNER_IMAGE_ALLOWED_PREFIX: nvcr.io/0898940053369630/pulse/pulse-oss-cli
+      CHARON_PROXY_SERVER: ext-nv-prd-apps.teleport.sh:443
+      CHARON_JOIN_TOKEN: charon-gha-runners
+      CHARON_APP_NAME: charon
+      CHARON_LOCAL_PORT: "8888"
+      # not TELEPORT_*, which tbot consumes. A client version is configuration, not a
+      # credential, so it is provisioned like every other scanner setting here rather than
+      # as a secret — masking it would only hide it from the audit trail and the job log.
+      # auto resolves the version from the proxy when the variable is unset.
+      CHARON_CLIENT_VERSION: ${{ vars.VULN_SCAN_TUNNEL_CLIENT_VERSION || 'auto' }}
+    steps:
+      - name: Validate scan contract
+        id: contract
+        env:
+          INPUT_NSPECT_ID: ${{ inputs.nspect_id }}
+          INPUT_REGISTERED_BRANCH: ${{ inputs.registered_branch }}
+          INPUT_SCAN_MODE: ${{ inputs.scan_mode }}
+          INPUT_SCAN_PATH: ${{ inputs.scan_path }}
+          INPUT_FAILURE_POLICY: ${{ inputs.failure_policy }}
+          INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+          NV_VAULT_URL: ${{ vars.NV_VAULT_URL }}
+          NVCR_VAULT_ROLE: ${{ vars.NVCR_VAULT_ROLE }}
+          NVCR_VAULT_JWT_PATH: ${{ vars.NVCR_VAULT_JWT_PATH }}
+          NVCR_VAULT_NAMESPACE: ${{ vars.NVCR_VAULT_NAMESPACE }}
+          NVCR_VAULT_SECRET_PATH: ${{ vars.NVCR_VAULT_SECRET_PATH }}
+        run: |
+          set -euo pipefail
+
+          # Fork-authored code must not reach a job holding OIDC on an untrusted event.
+          # Consumers trigger this on push, including the copy-pr-bot mirrored
+          # pull-request/N refs.
+          case "$GITHUB_EVENT_NAME" in
+            pull_request|pull_request_target)
+              echo "::error::${GITHUB_EVENT_NAME} is not a trusted trigger for this scan. Call it from push, schedule, or workflow_dispatch."
+              exit 1
+              ;;
+          esac
+
+          # Name the missing variable rather than letting the Vault action fail on
+          # "Input required and not supplied: url". vars resolves against the caller.
+          missing=()
+          for name in NV_VAULT_URL NVCR_VAULT_ROLE NVCR_VAULT_JWT_PATH \
+            NVCR_VAULT_NAMESPACE NVCR_VAULT_SECRET_PATH; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing Actions variable(s): ${missing[*]}. They must be visible to the calling repository — ask the GitHub-First platform team to provision them for this organization."
+            exit 1
+          fi
+
+          # Catches an unset image variable too: either half missing fails this match.
+          if [[ ! "$SCANNER_IMAGE_REF" =~ ^"$SCANNER_IMAGE_ALLOWED_PREFIX"@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The scanner image must be ${SCANNER_IMAGE_ALLOWED_PREFIX} pinned to a full sha256 digest. Check VULN_SCAN_PULSE_OSS_IMAGE and VULN_SCAN_PULSE_OSS_IMAGE_DIGEST."
+            exit 1
+          fi
+          # The value reaches teleport-actions/setup, which builds a download URL from it.
+          # '..' is rejected on top of the semver shape so no traversal sequence can survive
+          # the pre-release field, which does accept dots and dashes.
+          if [[ "$CHARON_CLIENT_VERSION" != auto ]] \
+            && { [[ ! "$CHARON_CLIENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] \
+              || [[ "$CHARON_CLIENT_VERSION" == *".."* ]]; }; then
+            echo "::error::VULN_SCAN_TUNNEL_CLIENT_VERSION must be a bare semantic version, or unset to resolve it from the proxy."
+            exit 1
+          fi
+          # Set only when the caller granted id-token: write, so presence is the grant check.
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" \
+            || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "::error::GitHub OIDC is unavailable. The caller must grant id-token: write."
+            exit 1
+          fi
+
+          if [[ ! "$INPUT_NSPECT_ID" =~ ^NSPECT-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$ ]]; then
+            echo "::error::nspect_id must be a valid nSpect ID (NSPECT-xxxx-xxxx)."
+            exit 1
+          fi
+          if [[ ! "$INPUT_REGISTERED_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$ ]] \
+            || [[ "$INPUT_REGISTERED_BRANCH" == *".."* ]] \
+            || [[ "$INPUT_REGISTERED_BRANCH" == */ ]]; then
+            echo "::error::registered_branch is invalid."
+            exit 1
+          fi
+          case "$INPUT_SCAN_MODE" in auto|persistent|rapid) ;;
+            *) echo "::error::scan_mode must be auto, persistent, or rapid."; exit 1 ;;
+          esac
+          case "$INPUT_FAILURE_POLICY" in report-only|fail-on-vulnerability) ;;
+            *) echo "::error::failure_policy must be report-only or fail-on-vulnerability."; exit 1 ;;
+          esac
+          if [[ ! "$INPUT_TIMEOUT" =~ ^[0-9]+$ ]] \
+            || (( 10#$INPUT_TIMEOUT < 60 || 10#$INPUT_TIMEOUT > 3600 )); then
+            echo "::error::timeout_seconds must be a whole number between 60 and 3600."
+            exit 1
+          fi
+
+          resolved_mode="$INPUT_SCAN_MODE"
+          if [[ "$resolved_mode" == auto ]]; then
+            if [[ "$GITHUB_REF" == "refs/heads/$INPUT_REGISTERED_BRANCH" ]]; then
+              resolved_mode=persistent
+            else
+              resolved_mode=rapid
+            fi
+          fi
+          # A persistent scan owns a stable project/version, so only the registered ref may run one.
+          if [[ "$resolved_mode" == persistent && "$GITHUB_REF" != "refs/heads/$INPUT_REGISTERED_BRANCH" ]]; then
+            echo "::error::A persistent scan requires the checked-out ref to be refs/heads/${INPUT_REGISTERED_BRANCH}."
+            exit 1
+          fi
+          if [[ "$INPUT_WRITEBACK" == true && "$resolved_mode" != persistent ]]; then
+            echo "::error::inventory_writeback is available only for a persistent scan."
+            exit 1
+          fi
+
+          # Private Docker config, so the registry login can be destroyed on its own.
+          docker_config="$RUNNER_TEMP/pulse-oss-docker"
+          install -d -m 700 "$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
+
+          {
+            printf 'resolved_mode=%s\n' "$resolved_mode"
+            printf 'project_name=%s\n' "${GITHUB_REPOSITORY#*/}"
+            printf 'project_version=%s\n' "$INPUT_REGISTERED_BRANCH"
+          } >> "$GITHUB_OUTPUT"
+
+          # Artifact names must differ when one run calls this workflow more than once, so
+          # they carry the scan path. Artifact names reject / \ : < > | * ? " and CR/LF.
+          slug="$(printf '%s' "$INPUT_SCAN_PATH" | tr -c 'A-Za-z0-9._-' '-' \
+            | sed -e 's/-\{2,\}/-/g' -e 's/^-//' -e 's/-$//')"
+          if [[ -z "$slug" || "$slug" == "." ]]; then
+            slug=root
+          fi
+          printf 'artifact_slug=%s\n' "$slug" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout scan source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false  # don't leave GITHUB_TOKEN in .git for the scanned tree
+
+      # CI self-test only. Writes a manifest with a known-vulnerable pin so the detection path
+      # can be exercised end-to-end; committing one would put a deliberate CVE in a public
+      # repository's dependency graph. Inert for every downstream consumer even if the flag is passed.
+      # Runs before the scan-path validation below, which requires the directory to exist.
+      - name: (self-test) Create disposable vulnerable-dependency fixture
+        if: ${{ inputs.ci_test_setup && github.repository == 'NVIDIA/security-workflows' }}
+        env:
+          FIXTURE_DIR: ${{ github.workspace }}/.pulse-oss-selftest
+        run: |
+          set -euo pipefail
+          echo "::warning::ci_test_setup is enabled — planting a disposable vulnerable-dependency fixture for CI self-test."
+          mkdir -p "$FIXTURE_DIR"
+          cat > "$FIXTURE_DIR/pom.xml" <<'XML'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>com.nvidia.securityworkflows.selftest</groupId>
+            <artifactId>vuln-scan-detection-fixture</artifactId>
+            <version>1.0.0</version>
+            <!-- Pinned to a version with published advisories so a zero-finding result is a
+                 defect rather than good news. No dependency code is ever executed. -->
+            <dependencies>
+              <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-core</artifactId>
+                <version>2.14.1</version>
+              </dependency>
+            </dependencies>
+          </project>
+          XML
+
+      - name: Validate scan path
+        id: source
+        env:
+          INPUT_SCAN_PATH: ${{ inputs.scan_path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          raw = os.environ["INPUT_SCAN_PATH"].strip()
+
+          def fail(message):
+              raise SystemExit(f"::error::{message}")
+
+          if not raw:
+              fail("scan_path is empty.")
+          if any(ord(character) < 32 or ord(character) == 127 for character in raw):
+              fail("scan_path contains unsupported control characters.")
+          candidate = Path(raw)
+          if candidate.is_absolute() or ".." in candidate.parts:
+              fail("scan_path must be repository-relative and cannot contain '..'.")
+
+          unresolved = workspace / candidate
+          if unresolved.is_symlink():
+              fail("scan_path selects a symbolic link.")
+          try:
+              root = unresolved.resolve(strict=True)
+          except FileNotFoundError:
+              fail("scan_path does not exist in the checkout.")
+          if root != workspace and workspace not in root.parents:
+              fail("scan_path resolves outside the checkout.")
+          if not root.is_dir():
+              fail("scan_path must select a directory.")
+
+          # A link out of the scanned tree would smuggle unreviewed content into the mount.
+          for entry in root.rglob("*"):
+              if entry.is_symlink():
+                  target = entry.resolve(strict=False)
+                  if target != root and root not in target.parents:
+                      fail("A symbolic link under scan_path escapes the scanned tree.")
+
+          relative = root.relative_to(workspace).as_posix()
+          container_path = "/workspace" if relative == "." else f"/workspace/{relative}"
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"container_path={container_path}\n")
+          PY
+
+      # Audience here is Vault's, not Charon's — each request mints its own token, so both
+      # identities live under the single id-token: write grant.
+      - name: Import nvcr.io credentials from Vault
+        uses: hashicorp/vault-action@4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b  # v3.4.0
+        with:
+          url: ${{ vars.NV_VAULT_URL }}
+          role: ${{ vars.NVCR_VAULT_ROLE }}
+          method: jwt
+          path: ${{ vars.NVCR_VAULT_JWT_PATH }}
+          jwtGithubAudience: https://token.actions.githubusercontent.com
+          namespace: ${{ vars.NVCR_VAULT_NAMESPACE }}
+          secrets: |
+            ${{ vars.NVCR_VAULT_SECRET_PATH }} username | NVCR_IO_USERNAME ;
+            ${{ vars.NVCR_VAULT_SECRET_PATH }} password | NVCR_IO_PASSWORD
+
+      - name: Log in to nvcr.io
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        with:
+          registry: nvcr.io
+          username: ${{ env.NVCR_IO_USERNAME }}
+          password: ${{ env.NVCR_IO_PASSWORD }}
+          logout: false
+
+      - name: Pull Pulse OSS scanner image
+        run: docker pull "$SCANNER_IMAGE_REF" >/dev/null
+
+      - name: Log out of nvcr.io
+        if: always()
+        run: docker logout nvcr.io >/dev/null 2>&1 || true
+
+      - name: Install Charon tunnel client
+        uses: teleport-actions/setup@b638ff596557cc3959eb6b5287d5e58e0c8ac6a6  # v1
+        with:
+          version: ${{ env.CHARON_CLIENT_VERSION }}
+          # Required for version: auto — the action asks this proxy which client to install.
+          # Harmless when the caller pinned a version.
+          proxy: ${{ env.CHARON_PROXY_SERVER }}
+
+      - name: Start Charon loopback tunnel
+        run: |
+          set -euo pipefail
+          umask 077
+          tbot_config="$(mktemp "${RUNNER_TEMP}/pulse-oss-tbot.XXXXXX.yaml")"
+          tbot_log="$(mktemp "${RUNNER_TEMP}/pulse-oss-tbot.XXXXXX.log")"
+          cat > "$tbot_config" <<EOF
+          version: v2
+          proxy_server: $CHARON_PROXY_SERVER
+          onboarding:
+            join_method: github
+            token: $CHARON_JOIN_TOKEN
+          storage:
+            type: memory
+          outputs: []
+          services:
+            - type: application-tunnel
+              app_name: $CHARON_APP_NAME
+              listen: tcp://127.0.0.1:$CHARON_LOCAL_PORT
+          EOF
+
+          tbot start -c "$tbot_config" > "$tbot_log" 2>&1 &
+          tbot_pid=$!
+          {
+            printf 'PULSE_OSS_TBOT_CONFIG=%s\n' "$tbot_config"
+            printf 'PULSE_OSS_TBOT_LOG=%s\n' "$tbot_log"
+            printf 'PULSE_OSS_TBOT_PID=%s\n' "$tbot_pid"
+          } >> "$GITHUB_ENV"
+
+          for _ in {1..30}; do
+            if curl --fail --silent --show-error \
+              "http://127.0.0.1:${CHARON_LOCAL_PORT}/ready" >/dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$tbot_pid" 2>/dev/null; then
+              echo "::error::The Charon tunnel exited before it became ready."
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::The Charon tunnel did not become ready within 30 seconds."
+          exit 1
+
+      - name: Pulse OSS vulnerability scan
+        id: scanner
+        env:
+          RESOLVED_MODE: ${{ steps.contract.outputs.resolved_mode }}
+          PROJECT_NAME: ${{ steps.contract.outputs.project_name }}
+          PROJECT_VERSION: ${{ steps.contract.outputs.project_version }}
+          CONTAINER_SCAN_PATH: ${{ steps.source.outputs.container_path }}
+          INPUT_NSPECT_ID: ${{ inputs.nspect_id }}
+          INPUT_REGISTERED_BRANCH: ${{ inputs.registered_branch }}
+          INPUT_BUILD: ${{ inputs.build }}
+          INPUT_FAILURE_POLICY: ${{ inputs.failure_policy }}
+          INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          set -euo pipefail
+          umask 077
+          output_dir="$RUNNER_TEMP/pulse-oss-scan"
+          mkdir -p "$output_dir"
+          raw_log="$(mktemp "${RUNNER_TEMP}/pulse-oss-scanner.XXXXXX.log")"
+          container_name="pulse-oss-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # The CLI rejects path separators here, so it writes into workdir /tmp instead.
+          report_name="vulnerability-report.json"
+
+          {
+            printf 'PULSE_OSS_OUTPUT_DIR=%s\n' "$output_dir"
+            printf 'PULSE_OSS_RAW_LOG=%s\n' "$raw_log"
+            printf 'PULSE_OSS_CONTAINER=%s\n' "$container_name"
+          } >> "$GITHUB_ENV"
+
+          policy_flag=--no-fail
+          if [[ "$INPUT_FAILURE_POLICY" == fail-on-vulnerability ]]; then
+            policy_flag=--fail
+          fi
+
+          command=(
+            pulse --no-echo --no-color --timeout "$INPUT_TIMEOUT"
+            --charon-url "http://127.0.0.1:${CHARON_LOCAL_PORT}"
+            --nspect-id "$INPUT_NSPECT_ID"
+            --repo-url "ssh://git@github.com/${GITHUB_REPOSITORY}.git"
+            --repo-branch "$INPUT_REGISTERED_BRANCH"
+          )
+          if [[ "$RESOLVED_MODE" == persistent ]]; then
+            command+=(
+              scan --project "$PROJECT_NAME" --project-version "$PROJECT_VERSION"
+              "$policy_flag" --vulnerability-report "$report_name"
+            )
+            if [[ "$INPUT_WRITEBACK" == true ]]; then
+              command+=(--override)
+            fi
+          else
+            command+=(rapidscan "$policy_flag" --vulnerability-report "$report_name")
+          fi
+          if [[ "$INPUT_BUILD" == true ]]; then
+            command+=(--build)
+          else
+            command+=(--no-build)
+          fi
+          command+=("$CONTAINER_SCAN_PATH")
+
+          # --network host is required: the scanner reaches Charon over the loopback tunnel.
+          docker create \
+            --name "$container_name" \
+            --network host \
+            --workdir /tmp \
+            --env ACTIONS_ID_TOKEN_REQUEST_URL \
+            --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            --env CI=true \
+            --env GITHUB_ACTIONS=true \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            "$SCANNER_IMAGE_REF" \
+            "${command[@]}" >/dev/null
+
+          set +e
+          docker start --attach "$container_name" > "$raw_log" 2>&1
+          scanner_status=$?
+          set -e
+
+          docker cp "$container_name:/tmp/$report_name" \
+            "$output_dir/$report_name" >/dev/null 2>&1 || true
+
+          # Classify before anything keys off the result. This CLI has returned zero after a
+          # backend failure, so the effective status is what counts, and gating the
+          # diagnostics on the process exit code would suppress them for exactly the case
+          # the markers below exist to catch.
+          SCANNER_STATUS="$scanner_status" RAW_LOG="$raw_log" OUTPUT_DIR="$output_dir" \
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = Path(os.environ["RAW_LOG"]).read_text(
+              encoding="utf-8", errors="replace").lower()
+          status = int(os.environ["SCANNER_STATUS"])
+          # Detect exits 3 (FAILURE_POLICY_VIOLATION) and the CLI then logs "scan is failed
+          # with status code" for a scan that completed and found something. Findings are an
+          # outcome, not a transport failure, so they must be read from the report and left
+          # to failure_policy — checked first, because the wording collides with a real
+          # backend error.
+          policy_markers = (
+              "failure_policy_violation",
+              "scan job found",
+          )
+          backend_markers = (
+              "rapid scan is failed with status code",
+              "stateless scan is failed with status code",
+          )
+          if any(marker in raw for marker in policy_markers):
+              category = "vulnerability-policy"
+              status = 0
+          elif any(marker in raw for marker in backend_markers):
+              category = "downstream-scan-error"
+              if status == 0:
+                  status = 70
+          else:
+              category = "scanner-error" if status else "none"
+              for marker, candidate in (
+                  ("github oidc token request failed", "github-identity-error"),
+                  ("unable to obtain github oidc", "github-identity-error"),
+                  ("charon request failed", "charon-gateway-error"),
+                  ("registration verification failed", "registration-or-service-error"),
+                  ("nspect verification failed", "registration-or-service-error"),
+                  ("invalid nspect id", "registration-or-service-error"),
+                  ("is not registered", "registration-or-service-error"),
+                  ("operation timed out", "timeout"),
+              ):
+                  if marker in raw:
+                      category = candidate
+                      break
+
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          (output_dir / "scanner-status.json").write_text(
+              json.dumps({"scanner_exit_code": status,
+                          "diagnostic_category": category}, sort_keys=True) + "\n",
+              encoding="utf-8")
+          (output_dir / "effective-status").write_text(str(status), encoding="utf-8")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"exit_code={status}\n")
+              output.write(f"diagnostic_category={category}\n")
+          PY
+          effective_status="$(cat "$output_dir/effective-status")"
+
+          # A failed scanner usually produces no report; keep a redacted copy of its output.
+          if [[ "$effective_status" -ne 0 ]]; then
+            RAW_LOG="$raw_log" OUTPUT_DIR="$output_dir" \
+              SENSITIVE_NSPECT_ID="$INPUT_NSPECT_ID" python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          raw = Path(os.environ["RAW_LOG"]).read_text(encoding="utf-8", errors="replace")
+          for value in (
+              os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", ""),
+              os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""),
+              os.environ.get("SENSITIVE_NSPECT_ID", ""),
+              os.environ.get("SCANNER_IMAGE_REF", ""),
+          ):
+              if value:
+                  raw = raw.replace(value, "[REDACTED]")
+
+          secret_key = (
+              r"(?:authorization|proxy[_ .-]?authorization|x-charon-gha-token|"
+              r"(?:[a-z0-9_-]+[.])?api[._ -]?token|access[._ -]?token|id[._ -]?token|"
+              r"ssa[._ -]?token|client[._ -]?secret|password)"
+          )
+          patterns = (
+              (re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]"), ""),
+              (re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
+                          r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
+               "[REDACTED_JWT]"),
+              (re.compile(rf"(?i)((?:--)?[\"']?{secret_key}[\"']?\s*[:=]\s*"
+                          rf"[\"']?(?:bearer\s+)?)[^\s\"',;}}\]]+"), r"\1[REDACTED]"),
+              (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
+              (re.compile(r"(?i)([?&](?:token|access_token|id_token|jwt|sig|key|secret)=)"
+                          r"[^&#\s]+"), r"\1[REDACTED]"),
+              (re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@"), r"\1[REDACTED]@"),
+          )
+          for pattern, replacement in patterns:
+              raw = pattern.sub(replacement, raw)
+
+          limit = 2_000_000
+          if len(raw) > limit:
+              half = limit // 2
+              raw = raw[:half] + "\n[... sanitized log truncated ...]\n" + raw[-half:]
+          destination = Path(os.environ["OUTPUT_DIR"]) / "scanner-failure.log"
+          destination.write_text(raw, encoding="utf-8")
+          destination.chmod(0o600)
+          PY
+
+            # Put the reason in the log. Downloading an artifact to read one line of
+            # sanitized output is too slow a diagnosis for a failing pipeline.
+            failure_log="$output_dir/scanner-failure.log"
+            excerpt="$(grep -m1 -iE '^[[:space:]]*error[: ]' "$failure_log" || true)"
+            [[ -n "$excerpt" ]] \
+              || excerpt="$(grep -v '^[[:space:]]*$' "$failure_log" | tail -n 1 || true)"
+            [[ -z "$excerpt" ]] \
+              || echo "::error::Scanner: ${excerpt:0:500}"
+            echo "::group::Sanitized scanner output (last 40 lines)"
+            tail -n 40 "$failure_log" || true
+            echo "::endgroup::"
+          fi
+
+      - name: Validate scan report
+        id: report
+        # A failed scanner writes no report, so validating it would only report the
+        # symptom and bury the cause.
+        if: always() && steps.scanner.outputs.exit_code == '0'
+        run: |
+          set -euo pipefail
+          OUTPUT_DIR="$PULSE_OSS_OUTPUT_DIR" python3 - <<'PY'
+          import json
+          import os
+          import re
+          from collections import Counter
+          from pathlib import Path
+
+          report = Path(os.environ["OUTPUT_DIR"]) / "vulnerability-report.json"
+          try:
+              payload = json.loads(report.read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError):
+              raise SystemExit("::error::The scan report is missing or is not valid JSON.")
+
+          jwt_value = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
+                                 r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")
+          bearer_value = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+          signed_url = re.compile(
+              r"[?&](?:token|access_token|id_token|jwt|sig|signature|"
+              r"x-amz-(?:signature|credential|security-token))=", re.IGNORECASE)
+          sensitive_key = re.compile(
+              r"(^|_)(authorization|proxy_authorization|cookie|set_cookie|api_key|api_token|"
+              r"token|secret|access_token|id_token|refresh_token|client_secret|password|"
+              r"credential|x_charon_gha_token)($|_)")
+
+          def normalized_key(value):
+              value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+              return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower()
+
+          def inspect(value):
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      if sensitive_key.search(normalized_key(str(key))):
+                          raise SystemExit(
+                              "::error::The scan report contains a credential-like field.")
+                      inspect(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      inspect(child)
+              elif isinstance(value, str) and (jwt_value.search(value)
+                                               or bearer_value.search(value)
+                                               or signed_url.search(value)):
+                  raise SystemExit(
+                      "::error::The scan report contains a credential-like value.")
+
+          inspect(payload)
+
+          findings = None
+          if isinstance(payload, list):
+              findings = payload
+          elif isinstance(payload, dict):
+              for key in ("Data", "data", "vulnerabilities", "items", "results"):
+                  if isinstance(payload.get(key), list):
+                      findings = payload[key]
+                      break
+          if findings is None:
+              raise SystemExit(
+                  "::error::The scan report does not contain a supported findings list.")
+
+          # Severity field names vary by report version, so tally whatever *severity key is there.
+          severities = Counter()
+          for finding in findings:
+              if not isinstance(finding, dict):
+                  continue
+              for key, value in finding.items():
+                  if normalized_key(str(key)).endswith("severity") and isinstance(value, str):
+                      severities[value.strip().lower() or "unspecified"] += 1
+                      break
+          breakdown = ", ".join(
+              f"{name}: {count}" for name, count in sorted(severities.items())
+          ) or "not reported"
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"finding_count={len(findings)}\n")
+              output.write(f"severity_breakdown={breakdown}\n")
+          PY
+
+      - name: Write scan summary
+        if: always()
+        env:
+          RESOLVED_MODE: ${{ steps.contract.outputs.resolved_mode || 'unavailable' }}
+          FAILURE_POLICY: ${{ inputs.failure_policy }}
+          WRITEBACK: ${{ inputs.inventory_writeback }}
+          SCAN_PATH: ${{ inputs.scan_path }}
+          BUILD_MODE: ${{ inputs.build }}
+          FINDING_COUNT: ${{ steps.report.outputs.finding_count || 'unavailable' }}
+          SEVERITY_BREAKDOWN: ${{ steps.report.outputs.severity_breakdown || 'unavailable' }}
+          REPORT_STATUS: ${{ steps.report.outcome }}
+          DIAGNOSTIC_CATEGORY: ${{ steps.scanner.outputs.diagnostic_category || 'none' }}
+          SCANNER_EXIT: ${{ steps.scanner.outputs.exit_code || 'unavailable' }}
+        run: |
+          {
+            echo "## Vulnerability scan (Pulse OSS)"
+            echo
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Resolved mode | $RESOLVED_MODE |"
+            echo "| Scan path | $SCAN_PATH |"
+            echo "| Build mode | $BUILD_MODE |"
+            echo "| Failure policy | $FAILURE_POLICY |"
+            echo "| Inventory write-back | $WRITEBACK |"
+            echo "| Scanner exit code | $SCANNER_EXIT |"
+            echo "| Status-only diagnostic | $DIAGNOSTIC_CATEGORY |"
+            echo "| Findings | $FINDING_COUNT |"
+            echo "| Severity breakdown | $SEVERITY_BREAKDOWN |"
+            echo "| Report validation | $REPORT_STATUS |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload validated report
+        if: always() && inputs.upload_report && steps.report.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pulse-oss-scan-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pulse-oss-scan/vulnerability-report.json
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload sanitized failure diagnostics
+        if: always() && steps.scanner.outputs.exit_code != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pulse-oss-scan-failure-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/pulse-oss-scan/scanner-status.json
+            ${{ runner.temp }}/pulse-oss-scan/scanner-failure.log
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Enforce scan result
+        if: always()
+        env:
+          FAILURE_POLICY: ${{ inputs.failure_policy }}
+          FINDING_COUNT: ${{ steps.report.outputs.finding_count || '0' }}
+          REPORT_STATUS: ${{ steps.report.outcome }}
+          SCANNER_EXIT: ${{ steps.scanner.outputs.exit_code || '' }}
+          DIAGNOSTIC_CATEGORY: ${{ steps.scanner.outputs.diagnostic_category || 'unavailable' }}
+        run: |
+          set -euo pipefail
+          # Fail closed: a missing, malformed, or credential-bearing report is never a pass.
+          if [[ -z "$SCANNER_EXIT" ]]; then
+            echo "::error::The scan did not run to completion — no scanner exit code was recorded."
+            exit 1
+          fi
+          # Before the exit code: a blocked policy makes the exit a consequence of findings.
+          if [[ "$FAILURE_POLICY" == fail-on-vulnerability && "$REPORT_STATUS" == success ]] \
+            && (( FINDING_COUNT > 0 )); then
+            echo "::error::Pulse OSS scan: ${FINDING_COUNT} vulnerability finding(s) violate failure_policy=fail-on-vulnerability."
+            exit 1
+          fi
+          # Before the report status: the scanner is the cause, the missing report only
+          # the symptom, and naming the symptom sends the reader down the wrong path.
+          if [[ "$SCANNER_EXIT" != 0 ]]; then
+            echo "::error::Pulse OSS scan failed before it produced a report (${DIAGNOSTIC_CATEGORY}). See the sanitized scanner output in the scan step."
+            exit 1
+          fi
+          if [[ "$REPORT_STATUS" != success ]]; then
+            echo "::error::The scan did not produce a safe, valid report."
+            exit 1
+          fi
+          if (( FINDING_COUNT > 0 )); then
+            echo "::warning::Pulse OSS scan: ${FINDING_COUNT} vulnerability finding(s) do not block under failure_policy=report-only."
+          else
+            echo "::notice::Pulse OSS scan: no vulnerability findings."
+          fi
+
+      - name: Remove temporary scanner state
+        if: always()
+        run: |
+          if [[ -n "${PULSE_OSS_TBOT_PID:-}" ]]; then
+            kill "$PULSE_OSS_TBOT_PID" 2>/dev/null || true
+            wait "$PULSE_OSS_TBOT_PID" 2>/dev/null || true
+          fi
+          [[ -z "${PULSE_OSS_CONTAINER:-}" ]] \
+            || docker rm --force "$PULSE_OSS_CONTAINER" >/dev/null 2>&1 || true
+          docker image rm --force "$SCANNER_IMAGE_REF" >/dev/null 2>&1 || true
+          rm -f "${PULSE_OSS_TBOT_CONFIG:-}" "${PULSE_OSS_TBOT_LOG:-}" "${PULSE_OSS_RAW_LOG:-}"
+          [[ -z "${DOCKER_CONFIG:-}" ]] || rm -rf "$DOCKER_CONFIG"
