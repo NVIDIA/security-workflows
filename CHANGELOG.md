@@ -4,6 +4,25 @@ All notable changes to the workflows in this repository will be documented in th
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See [`README.md`](README.md#versioning) for the SHA-pinning contract that consumers are expected to follow.
 
+## [Unreleased]
+
+Additive release. Existing suite callers need no change: `enable-vuln-scan` defaults to false, and the scan's `contents: read` + `id-token: write` are already inside the suite's permission union.
+
+### Added
+
+- Vulnerability scan (SCA) reusable workflow — [`.github/workflows/vuln-scan-pulse-oss.yml`](.github/workflows/vuln-scan-pulse-oss.yml). Runs NVIDIA's Pulse OSS scanner and reports to the nSpect backend over a Charon loopback tunnel. GitHub OIDC is the only identity presented: the `nvcr.io` image is pulled with short-lived Vault credentials, so consumers supply none of their own. The image repository path is fixed in the workflow and the resolved reference is checked against it, so a caller cannot redirect the scan; the tag itself is caller-supplied and mutable, matching how `secret-scan-pulse.yml` is provisioned. `pull_request` / `pull_request_target` are rejected. Prerequisites and constraints are in the [workflow catalogue](.github/workflows/README.md#vulnerability-scan-sca--vuln-scan-pulse-ossyml).
+- Security suite — `enable-vuln-scan` with `vuln-*` inputs (`vuln-registered-branch`, `vuln-runs-on`, `vuln-scan-path`, `vuln-scan-mode`, `vuln-build`, `vuln-failure-policy`, `vuln-inventory-writeback`, `vuln-upload-report`, `vuln-timeout-seconds`), plus an unprefixed `nspect-id`: an nSpect ID identifies the repository rather than one scan. Enabling the scan without it fails the preflight.
+- CI — contract tests driving the four gates extracted from `vuln-scan-pulse-oss.yml` (input contract, `scan_path` containment, report validation, enforcement) and the suite preflight, located by step name so a rename fails extraction rather than silently testing nothing. They cover what a live scan cannot: every rejection path, and `fail-on-vulnerability`, whose correct outcome is a *failing* job — unmaskable in a reusable-workflow call.
+- CI — live integration on every push, ungated, so the scan's prerequisites (`NSPECT_ID`, the image variables, and the triggering ref on this repository's Charon tenant allowlist) are hard requirements rather than optional extras. One scan proves transport; a `ci_test_setup` fixture with a known-vulnerable pin proves detection, asserted non-zero — a clean result there would mean no components resolved, not that the dependency is safe.
+
+### Changed
+
+- Security suite — the preflight reports *every* missing companion input in one run rather than exiting on the first.
+
+### Known limitations
+
+- **SARIF publication is a follow-up.** Findings land in the job summary and an optional artifact, not the Security tab.
+
 ## [0.4.0] - 2026-08-19
 
 Additive release. Callers passing `languages: '["actions","python"]'` need no change; the declared `permissions:` are unchanged, and the `analyze` job keeps the name `CodeQL (<language>)` so required status checks continue to match.
