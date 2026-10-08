@@ -9,6 +9,7 @@
 #                 supported OS/architecture.
 #   - integration (Pulse): tests all three failure_policy scenarios with positive and negative cases.
 
+
 name: CI (lint + scan self-tests)
 
 on:
@@ -425,3 +426,712 @@ jobs:
     with:
       languages: '[{"language":"actions","build-mode":"none"}]'
       runs-on: ubuntu-latest
+
+  # ============================================================================
+  # Vulnerability scan (Pulse OSS) — contract tests.
+  #
+  # Runs the four gates extracted from vuln-scan-pulse-oss.yml itself, so the tests exercise
+  # the shipped scripts rather than copies that can drift. Steps are located by name, so
+  # renaming one fails the extraction loudly instead of silently testing nothing.
+  #
+  # These cover what a live scan cannot. The scan needs Vault, nvcr.io, a Charon tunnel and an
+  # nSpect registration, so every rejection path is unreachable from a real run; and the
+  # fail-on-vulnerability path's correct outcome is a FAILING job, which a reusable-workflow
+  # call cannot mask (`continue-on-error` is not an accepted key). Asserting the exit codes
+  # here keeps the run green, matching how the Pulse negatives above are shaped.
+  #
+  # Nothing credential-shaped is committed: the JWT and bearer fixtures the report validator
+  # must reject are constructed at run time, so this repository's own strict secret scan
+  # (secret-scan-pulse-policy-strict-positive) has nothing to find.
+  # ============================================================================
+  vuln-scan-contract:
+    name: Vulnerability scan — contract tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Extract the gates from vuln-scan-pulse-oss.yml
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import os, pathlib, yaml
+          workflow = yaml.safe_load(pathlib.Path(".github/workflows/vuln-scan-pulse-oss.yml").read_text())
+          job = workflow["jobs"]["pulse-oss"]
+          steps = {step["name"]: step for step in job["steps"]}
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          for filename, step_name in {
+              "contract.sh": "Validate scan contract",
+              "scan-path.sh": "Validate scan path",
+              "report.sh": "Validate scan report",
+              "enforce.sh": "Enforce scan result",
+          }.items():
+              # KeyError here is the point: a renamed step must fail loudly, not test nothing.
+              (temp / filename).write_text(steps[step_name]["run"])
+          # Source the allowed image prefix from the workflow so the test cannot drift from it.
+          (temp / "job-env.sh").write_text(
+              "ALLOWED_REGISTRY=%s\n" % job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"])
+          PY
+          for f in contract.sh scan-path.sh report.sh enforce.sh job-env.sh; do
+            test -s "$RUNNER_TEMP/$f"
+          done
+
+      - name: Assert the scan contract accepts and rejects the right inputs
+        env:
+          CONTRACT: ${{ runner.temp }}/contract.sh
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC1091
+          . "$RUNNER_TEMP/job-env.sh"
+          failures=0
+          # A placeholder namespace, not the real one: the guard constrains only the host,
+          # and the internal path is deliberately absent from this public repository.
+          IMAGE_PATH="${ALLOWED_REGISTRY}/0000000000000000/pulse/pulse-oss-cli"
+          GOOD_IMAGE="${IMAGE_PATH}:charon-stable"
+
+          # Every case starts from a valid contract and overrides exactly what it tests, so a
+          # rejection can only be caused by the field under test.
+          reset_case() {
+            EVENT=push; REF=refs/heads/main
+            IMAGE_REF="$GOOD_IMAGE"; CLIENT_VERSION=auto
+            OIDC_URL=https://oidc.example.invalid/token; OIDC_TOKEN=placeholder-not-a-real-token
+            VAULT_URL=https://vault.example.invalid
+            NSPECT_ID=NSPECT-ABCD-1234; REGISTERED_BRANCH=main
+            SCAN_MODE=rapid; SCAN_PATH=.; FAILURE_POLICY=report-only
+            WRITEBACK=false; TIMEOUT=1800
+          }
+
+          run_contract() {
+            : > "$RUNNER_TEMP/out.txt"
+            : > "$RUNNER_TEMP/env.txt"
+            code=0
+            GITHUB_EVENT_NAME="$EVENT" GITHUB_REF="$REF" \
+            GITHUB_REPOSITORY=NVIDIA/security-workflows \
+            GITHUB_ENV="$RUNNER_TEMP/env.txt" GITHUB_OUTPUT="$RUNNER_TEMP/out.txt" \
+            ACTIONS_ID_TOKEN_REQUEST_URL="$OIDC_URL" \
+            ACTIONS_ID_TOKEN_REQUEST_TOKEN="$OIDC_TOKEN" \
+            SCANNER_IMAGE_REF="$IMAGE_REF" SCANNER_IMAGE_ALLOWED_REGISTRY="$ALLOWED_REGISTRY" \
+            CHARON_CLIENT_VERSION="$CLIENT_VERSION" \
+            NV_VAULT_URL="$VAULT_URL" NVCR_VAULT_ROLE=role NVCR_VAULT_JWT_PATH=jwt-path \
+            NVCR_VAULT_NAMESPACE=namespace NVCR_VAULT_SECRET_PATH=secret/path \
+            INPUT_NSPECT_ID="$NSPECT_ID" \
+            INPUT_REGISTERED_BRANCH="$REGISTERED_BRANCH" \
+            INPUT_SCAN_MODE="$SCAN_MODE" INPUT_SCAN_PATH="$SCAN_PATH" \
+            INPUT_FAILURE_POLICY="$FAILURE_POLICY" INPUT_WRITEBACK="$WRITEBACK" \
+            INPUT_TIMEOUT="$TIMEOUT" \
+              bash "$CONTRACT" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          contract_output() { sed -n "s/^$1=//p" "$RUNNER_TEMP/out.txt"; }
+
+          # expect_ok <name> [<output-key> <expected-value>]
+          expect_ok() {
+            local name="$1" key="${2:-}" want="${3:-}"
+            run_contract
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected the contract to accept this, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            if [ -n "$key" ]; then
+              local got; got="$(contract_output "$key")"
+              if [ "$got" != "$want" ]; then
+                echo "::error::${name}: ${key} was '${got}', expected '${want}'"
+                failures=$((failures+1)); return
+              fi
+              echo "✓ ${name} (${key}=${got})"; return
+            fi
+            echo "✓ ${name}"
+          }
+
+          # expect_rejected <name> <substring the operator-facing error must contain>
+          expect_rejected() {
+            local name="$1" needle="$2"
+            run_contract
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the contract to reject this, but it succeeded"
+              failures=$((failures+1)); return
+            fi
+            if ! grep -q '::error::' "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${name}: failed without an actionable ::error:: message"
+              failures=$((failures+1)); return
+            fi
+            if ! grep -qF "$needle" "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${name}: error did not mention '${needle}'. Got: $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt")"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} — $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt" | sed 's/^::error:://' | cut -c1-110)"
+          }
+
+          reset_case; expect_ok "a valid rapid contract is accepted" resolved_mode rapid
+          reset_case; SCAN_MODE=auto; REF=refs/heads/main
+          expect_ok  "auto on the registered branch resolves to persistent" resolved_mode persistent
+          reset_case; SCAN_MODE=auto; REF=refs/heads/topic
+          expect_ok  "auto off the registered branch resolves to rapid" resolved_mode rapid
+          reset_case; SCAN_MODE=persistent; WRITEBACK=true
+          expect_ok  "inventory write-back is accepted on a persistent scan" resolved_mode persistent
+          reset_case; CLIENT_VERSION=17.1.2
+          expect_ok  "a pinned tunnel client version is accepted"
+          reset_case; expect_ok "scan_path '.' slugs to root" artifact_slug root
+          reset_case; SCAN_PATH=src/vendor/pkg
+          expect_ok  "a nested scan_path slugs into an artifact-safe name" artifact_slug src-vendor-pkg
+
+          # Fork-authored code must never reach a job holding OIDC.
+          reset_case; EVENT=pull_request
+          expect_rejected "pull_request is refused"        "not a trusted trigger"
+          reset_case; EVENT=pull_request_target
+          expect_rejected "pull_request_target is refused" "not a trusted trigger"
+
+          # vars resolve against the caller, so a missing one must be named, not left to
+          # surface as the Vault action's "Input required and not supplied: url".
+          reset_case; VAULT_URL=
+          expect_rejected "a missing Vault variable is named" "NV_VAULT_URL"
+
+          # The scanner image is caller-supplied through vars; only a digest pin under the
+          # allowed prefix may run. The tag itself is mutable by design (see the job env),
+          # so these cover redirection and tag grammar, not immutability.
+          reset_case; IMAGE_REF="${IMAGE_PATH}:1.2.0-alpha6"
+          expect_ok       "an alternative valid tag is accepted"
+          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-oss-cli:charon-stable"
+          expect_rejected "a foreign registry is rejected"        "hosted on"
+          # Anchoring and literal-dot: neither a host in front nor a lookalike matches.
+          reset_case; IMAGE_REF="registry.invalid/${IMAGE_PATH}:charon-stable"
+          expect_rejected "the allowed host behind another host is rejected" "hosted on"
+          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-oss-cli:charon-stable"
+          expect_rejected "a lookalike host is rejected"          "hosted on"
+          reset_case; IMAGE_REF=":charon-stable"
+          expect_rejected "an unset image variable is rejected"   "VULN_SCAN_PULSE_OSS_IMAGE"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:"
+          expect_rejected "an unset tag variable is rejected"     "VULN_SCAN_PULSE_OSS_IMAGE_TAG"
+          # A tag cannot carry a second reference past the prefix check.
+          reset_case; IMAGE_REF="${IMAGE_PATH}:latest@sha256:$(printf 'a%.0s' $(seq 64))"
+          expect_rejected "a tag smuggling a digest is rejected"  "carry a valid tag"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:.hidden"
+          expect_rejected "a tag starting with a dot is rejected" "carry a valid tag"
+
+          reset_case; CLIENT_VERSION=latest
+          expect_rejected "a non-semver tunnel client version is rejected" "bare semantic version"
+          reset_case; CLIENT_VERSION=1.2.3-..%2Fevil
+          expect_rejected "a traversal in the client version is rejected"  "bare semantic version"
+
+          reset_case; OIDC_URL=
+          expect_rejected "a caller without id-token: write is rejected" "id-token: write"
+
+          reset_case; NSPECT_ID=NSPECT-BAD
+          expect_rejected "a malformed nSpect id is rejected" "must be a valid nSpect ID"
+          reset_case; REGISTERED_BRANCH=../../etc
+          expect_rejected "a traversal in registered_branch is rejected" "registered_branch is invalid"
+          reset_case; SCAN_MODE=turbo
+          expect_rejected "an unknown scan_mode is rejected"   "scan_mode must be"
+          reset_case; FAILURE_POLICY=warn
+          expect_rejected "an unknown failure_policy is rejected" "failure_policy must be"
+          reset_case; TIMEOUT=30
+          expect_rejected "a timeout below the floor is rejected"   "between 60 and 3600"
+          reset_case; TIMEOUT=7200
+          expect_rejected "a timeout above the ceiling is rejected" "between 60 and 3600"
+          reset_case; TIMEOUT=abc
+          expect_rejected "a non-numeric timeout is rejected"       "between 60 and 3600"
+
+          # A persistent scan owns stable backend state, so only the registered ref may run one.
+          reset_case; SCAN_MODE=persistent; REF=refs/heads/topic
+          expect_rejected "a persistent scan off the registered ref is rejected" "persistent scan requires"
+          reset_case; SCAN_MODE=rapid; WRITEBACK=true
+          expect_rejected "write-back without a persistent scan is rejected" "inventory_writeback"
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} contract case(s) failed"
+            exit 1
+          fi
+          echo "All contract cases passed."
+
+      - name: Assert scan_path cannot escape the checkout
+        env:
+          SCAN_PATH_GATE: ${{ runner.temp }}/scan-path.sh
+        run: |
+          set -uo pipefail
+          failures=0
+          # `outside` is a SIBLING of the workspace, not a child, and it exists. A traversal
+          # case must be refused for traversing — if the escape target did not exist, the
+          # gate would refuse it for being missing and the test would pass even with the
+          # traversal guard deleted.
+          sandbox="$RUNNER_TEMP/sandbox"
+          workspace="$sandbox/ws"
+          rm -rf "$sandbox"
+          mkdir -p "$workspace/pkg/nested" "$workspace/contained" "$sandbox/outside"
+          : > "$workspace/pkg/manifest.txt"
+          : > "$workspace/plain-file"
+          : > "$sandbox/outside/unreviewed.txt"
+          ln -s "$workspace/pkg" "$workspace/link-to-pkg"
+          ln -s "$workspace/contained" "$workspace/contained/self"
+
+          # The escaping link lives in its own workspace. Left in the shared one it would sit
+          # under `.` and, correctly, make the repository-root case unscannable — masking the
+          # root case behind the escape case.
+          escape_workspace="$sandbox/ws-escape"
+          mkdir -p "$escape_workspace/escaping"
+          ln -s "$sandbox/outside" "$escape_workspace/escaping/way-out"
+
+          # run_gate <scan-path> [workspace]
+          run_gate() {
+            : > "$RUNNER_TEMP/out.txt"
+            code=0
+            GITHUB_WORKSPACE="${2:-$workspace}" INPUT_SCAN_PATH="$1" \
+              GITHUB_OUTPUT="$RUNNER_TEMP/out.txt" \
+              bash "$SCAN_PATH_GATE" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+            container_path="$(sed -n 's/^container_path=//p' "$RUNNER_TEMP/out.txt")"
+          }
+
+          expect_path() {
+            local name="$1" path="$2" want="$3"
+            run_gate "$path"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected acceptance, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            if [ "$container_path" != "$want" ]; then
+              echo "::error::${name}: container_path was '${container_path}', expected '${want}'"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} (${container_path})"
+          }
+
+          # The refusal reason is asserted, not just the refusal. Several guards here overlap,
+          # so a test that only checks "was refused" stays green when the guard it names is
+          # deleted and a later one happens to catch the case for an unrelated reason.
+          expect_refused() {
+            local name="$1" path="$2" needle="$3" where="${4:-$workspace}"
+            run_gate "$path" "$where"
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected refusal, but the path was accepted as '${container_path}'"
+              failures=$((failures+1)); return
+            fi
+            if ! grep -qF "$needle" "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${name}: refused, but not for the expected reason '${needle}'. Got: $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt")"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} — $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt" | sed 's/^.*::error:://' | cut -c1-110)"
+          }
+
+          expect_path "the repository root maps to the mount root" "." /workspace
+          expect_path "a subdirectory maps under the mount"        "pkg" /workspace/pkg
+          expect_path "a nested subdirectory maps under the mount" "pkg/nested" /workspace/pkg/nested
+          expect_path "a link that stays inside the tree is allowed" "contained" /workspace/contained
+
+          expect_refused "an empty scan_path"      ""                  "scan_path is empty"
+          expect_refused "an absolute scan_path"   "/etc"              "must be repository-relative"
+          expect_refused "a traversal to a real directory outside the checkout" \
+            "../outside"       "must be repository-relative"
+          expect_refused "an embedded traversal to a real directory" \
+            "pkg/../../outside" "must be repository-relative"
+          expect_refused "a path that does not exist"  "no-such-directory" "does not exist in the checkout"
+          expect_refused "a file rather than a directory" "plain-file"  "must select a directory"
+          expect_refused "a symlink as the scan root"  "link-to-pkg"    "selects a symbolic link"
+          expect_refused "a control character in the path" "$(printf 'pkg\tnested')" "control characters"
+          expect_refused "a symlink under the root escaping it" \
+            "escaping" "escapes the scanned tree" "$escape_workspace"
+          # A link out of the tree anywhere under the scan root blocks the scan, so a
+          # repository holding one cannot scan `.` until it is removed or scoped around.
+          expect_refused "the repository root when any link under it escapes" \
+            "." "escapes the scanned tree" "$escape_workspace"
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} scan_path case(s) failed"
+            exit 1
+          fi
+          echo "All scan_path cases passed."
+
+      - name: Assert the report validator fails closed on unsafe reports
+        env:
+          REPORT_GATE: ${{ runner.temp }}/report.sh
+        run: |
+          set -uo pipefail
+          failures=0
+          fixtures="$RUNNER_TEMP/report-fixtures"
+          rm -rf "$fixtures"
+
+          # Credential-shaped fixtures are built here rather than committed, so the repository's
+          # own secret scan has nothing to find in this file.
+          python3 - "$fixtures" <<'PY'
+          import base64, json, pathlib, sys
+
+          def b64(raw):
+              return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+          jwt = ".".join(b64(part) for part in (
+              '{"alg":"HS256","typ":"JWT"}', '{"sub":"contract-test"}', "not-a-real-signature"))
+          opaque = b64("contract-test-value-not-a-real-credential")
+
+          fixtures = {
+              "empty": [],
+              "findings": {"Data": [{"Severity": "HIGH", "Package Name": "left-pad"},
+                                    {"Severity": "high", "Package Name": "right-pad"},
+                                    {"Severity": "Low", "Package Name": "mid-pad"}]},
+              "unsupported-shape": {"summary": "no findings list here"},
+              "credential-key": {"Data": [{"Severity": "LOW", "api_token": "redacted-by-test"}]},
+              "credential-key-camel": {"Data": [{"Severity": "LOW", "clientSecret": "redacted-by-test"}]},
+              "jwt-value": {"Data": [{"Severity": "LOW", "evidence": jwt}]},
+              "bearer-value": {"Data": [{"Severity": "LOW", "evidence": "Bearer " + opaque}]},
+              "signed-url": {"Data": [{"Severity": "LOW",
+                                       "evidence": "https://example.invalid/a?access_token=" + opaque}]},
+          }
+          root = pathlib.Path(sys.argv[1])
+          for name, payload in fixtures.items():
+              directory = root / name
+              directory.mkdir(parents=True)
+              (directory / "vulnerability-report.json").write_text(json.dumps(payload))
+          (root / "missing").mkdir(parents=True)
+          malformed = root / "malformed"
+          malformed.mkdir(parents=True)
+          (malformed / "vulnerability-report.json").write_text("{not json")
+          PY
+
+          run_gate() {
+            : > "$RUNNER_TEMP/out.txt"
+            code=0
+            PULSE_OSS_OUTPUT_DIR="$fixtures/$1" GITHUB_OUTPUT="$RUNNER_TEMP/out.txt" \
+              bash "$REPORT_GATE" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          gate_output() { sed -n "s/^$1=//p" "$RUNNER_TEMP/out.txt"; }
+
+          expect_accepted() {
+            local name="$1" fixture="$2" want_count="$3" want_breakdown="$4"
+            run_gate "$fixture"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected acceptance, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            local got_count got_breakdown
+            got_count="$(gate_output finding_count)"
+            got_breakdown="$(gate_output severity_breakdown)"
+            if [ "$got_count" != "$want_count" ] || [ "$got_breakdown" != "$want_breakdown" ]; then
+              echo "::error::${name}: got count='${got_count}' breakdown='${got_breakdown}', expected count='${want_count}' breakdown='${want_breakdown}'"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} (${got_count} finding(s); ${got_breakdown})"
+          }
+
+          expect_refused() {
+            local name="$1" fixture="$2"
+            run_gate "$fixture"
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the validator to refuse this report, but it passed"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} — $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt" | sed 's/^.*::error:://' | cut -c1-110)"
+          }
+
+          expect_accepted "a clean report reports zero findings" empty 0 "not reported"
+          expect_accepted "severities are tallied case-insensitively" findings 3 "high: 2, low: 1"
+
+          expect_refused "a missing report"                    missing
+          expect_refused "a malformed report"                  malformed
+          expect_refused "a report with no findings list"      unsupported-shape
+          expect_refused "a credential-like field name"        credential-key
+          expect_refused "a camelCase credential-like field"   credential-key-camel
+          expect_refused "an embedded JWT"                     jwt-value
+          expect_refused "an embedded bearer token"            bearer-value
+          expect_refused "a signed URL"                        signed-url
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} report-validation case(s) failed"
+            exit 1
+          fi
+          echo "All report-validation cases passed."
+
+      - name: Assert enforcement blocks and warns per failure_policy
+        env:
+          ENFORCE: ${{ runner.temp }}/enforce.sh
+        run: |
+          set -uo pipefail
+          failures=0
+
+          # run <policy> <findings> <report-status> <scanner-exit> -> sets $code
+          run_enforce() {
+            code=0
+            FAILURE_POLICY="$1" FINDING_COUNT="$2" REPORT_STATUS="$3" SCANNER_EXIT="$4" \
+              DIAGNOSTIC_CATEGORY="${5:-none}" \
+              bash "$ENFORCE" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          # expect <pass|fail> <name> <policy> <findings> <report-status> <scanner-exit> [category]
+          expect() {
+            local want="$1" name="$2"; shift 2
+            run_enforce "$@"
+            if [ "$want" = pass ] && [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected the job to pass, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            if [ "$want" = fail ] && [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the job to FAIL, but enforcement passed it"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            echo "✓ ${name}"
+          }
+
+          # assert_message <name> <substring> <policy> <findings> <report-status> <exit> [category]
+          # Several branches here fail closed, so an exit code alone does not prove the right
+          # one fired — and which one fired is what the operator reads to diagnose the run.
+          assert_message() {
+            local name="$1" needle="$2"; shift 2
+            run_enforce "$@"
+            if grep -qF "$needle" "$RUNNER_TEMP/log.txt"; then
+              echo "✓ ${name}"; return
+            fi
+            echo "::error::${name}: expected the outcome to be reported as '${needle}'. Got: $(grep -m1 -E '::(error|warning|notice)::' "$RUNNER_TEMP/log.txt")"
+            failures=$((failures+1))
+          }
+
+          # This is the negative a live job cannot express: the pass signal is a failing job.
+          expect fail "fail-on-vulnerability blocks on a finding" \
+            fail-on-vulnerability 10 success 0
+          expect pass "fail-on-vulnerability passes a clean scan" \
+            fail-on-vulnerability 0 success 0
+          expect pass "report-only warns on findings instead of blocking" \
+            report-only 10 success 0
+          expect pass "report-only passes a clean scan" \
+            report-only 0 success 0
+
+          # Fail-closed: neither policy may pass a scan that did not produce a safe report.
+          expect fail "an aborted scan blocks under report-only" \
+            report-only 0 skipped "" none
+          expect fail "a scanner error blocks under report-only" \
+            report-only 0 skipped 70 downstream-scan-error
+          expect fail "a scanner error blocks under fail-on-vulnerability" \
+            fail-on-vulnerability 0 skipped 70 downstream-scan-error
+          expect fail "an unsafe report blocks under report-only" \
+            report-only 0 failure 0
+          expect fail "an unsafe report blocks under fail-on-vulnerability" \
+            fail-on-vulnerability 0 failure 0
+
+          # Findings are classified before the exit code, so a policy violation reports the
+          # findings rather than the transport failure the forced exit code would imply.
+          assert_message "a blocked scan names the policy it violated" \
+            "violate failure_policy=fail-on-vulnerability" fail-on-vulnerability 10 success 0
+          assert_message "report-only findings surface as a warning" \
+            "::warning::"          report-only 10 success 0
+          assert_message "a clean scan says so explicitly" \
+            "no vulnerability findings" report-only 0 success 0
+          assert_message "an aborted scan is reported as never having completed" \
+            "did not run to completion" report-only 0 skipped "" none
+          assert_message "a scanner failure names its diagnostic category" \
+            "(downstream-scan-error)" report-only 0 skipped 70 downstream-scan-error
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} enforcement case(s) failed"
+            exit 1
+          fi
+          echo "All enforcement cases passed."
+
+  # Security suite — preflight gating contract.
+  #
+  # The suite's companion-input errors (enable-* without the input that scan needs) are
+  # rejections, so asserting them through a real suite call would redden the run. Extracted
+  # and driven here instead, which also back-fills coverage for the pre-existing SAST case.
+  # ============================================================================
+  security-suite-preflight-contract:
+    name: Security suite preflight — contract tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Extract the preflight from security-suite.yml
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import os, pathlib, yaml
+          workflow = yaml.safe_load(pathlib.Path(".github/workflows/security-suite.yml").read_text())
+          steps = {step["name"]: step for step in workflow["jobs"]["preflight"]["steps"]}
+          pathlib.Path(os.environ["RUNNER_TEMP"], "preflight.sh").write_text(
+              steps["Report suite selection"]["run"])
+          PY
+          test -s "$RUNNER_TEMP/preflight.sh"
+
+      - name: Assert the preflight names every missing companion input
+        env:
+          PREFLIGHT: ${{ runner.temp }}/preflight.sh
+        run: |
+          set -uo pipefail
+          failures=0
+
+          # run <secret> <vuln> <sast> <nspect-id> <languages> -> sets $code
+          run_preflight() {
+            code=0
+            ENABLE_SECRET_SCAN="$1" ENABLE_VULN_SCAN="$2" ENABLE_SAST_SCAN="$3" \
+              NSPECT_ID="$4" SAST_LANGUAGES="$5" \
+              bash "$PREFLIGHT" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          expect_pass() {
+            local name="$1"; shift
+            run_preflight "$@"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected the preflight to pass, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            echo "✓ ${name}"
+          }
+
+          expect_fail() {
+            local name="$1" needle="$2"; shift 2
+            run_preflight "$@"
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the preflight to fail, but it passed"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            if ! grep -qF "$needle" "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${name}: error did not mention '${needle}'"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            echo "✓ ${name}"
+          }
+
+          # A suite that enables nothing warns and stays green — it is useless, not broken.
+          run_preflight false false false '' ''
+          if [ "$code" -ne 0 ]; then
+            echo "::error::an empty suite selection must warn, not fail"; failures=$((failures+1))
+          elif ! grep -q '::warning::' "$RUNNER_TEMP/log.txt"; then
+            echo "::error::an empty suite selection must emit a warning"; failures=$((failures+1))
+          else
+            echo "✓ an empty suite selection warns and stays green"
+          fi
+
+          expect_pass "a complete vuln selection is accepted" false true false NSPECT-ABCD-1234 ''
+          expect_pass "a complete SAST selection is accepted" false false true '' '["actions"]'
+          expect_pass "secret-only needs no companion input"  true  false false '' ''
+
+          expect_fail "enable-vuln-scan without an nSpect id is refused" \
+            nspect-id             false true  false '' ''
+          expect_fail "enable-sast-scan without languages is refused" \
+            sast-languages        false false true  '' ''
+
+          # Both must be reported in one run: fixing one and re-running to find the next is
+          # the failure mode this ordering exists to prevent.
+          run_preflight false true true '' ''
+          if [ "$code" -eq 0 ]; then
+            echo "::error::two missing companion inputs must fail"; failures=$((failures+1))
+          elif ! grep -qF nspect-id "$RUNNER_TEMP/log.txt" \
+             || ! grep -qF sast-languages "$RUNNER_TEMP/log.txt"; then
+            echo "::error::both missing companion inputs must be named in one run"
+            cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1))
+          else
+            echo "✓ two missing companion inputs are both named in one run"
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} preflight case(s) failed"
+            exit 1
+          fi
+          echo "All preflight cases passed."
+
+  # ============================================================================
+  # Vulnerability scan (Pulse OSS) — live integration.
+  #
+  # Ungated on purpose: these run on every push, so a regression in the scan surfaces here
+  # rather than behind a variable somebody has to remember to flip. That makes the scan's
+  # prerequisites hard requirements for this repository, not optional extras —
+  # VULN_SCAN_PULSE_OSS_IMAGE + _DIGEST and NSPECT_ID must be visible, and the triggering ref
+  # must appear in this repository's Charon tenant allowed_refs. Charon authorizes per ref,
+  # and a ref it does not list is refused as an nSpect HTTP 403, so CI covers only the refs
+  # the tenant lists: today that means pushes to main, and pull requests once the tenant also
+  # lists refs/heads/pull-request/*.
+  #
+  # scan_mode is pinned to rapid rather than left on auto: auto resolves to persistent on
+  # main, and a self-test must not create or update project state in the vulnerability
+  # backend. Only the detection job uploads a report — artifact names carry the scan-path
+  # slug, and two jobs scanning `.` in one run would otherwise collide on the same name.
+  # ============================================================================
+
+  # POSITIVE: a real scan of this repository's own manifests runs to completion.
+  # It asserts the transport chain and a valid report, NOT a finding count — a repository's
+  # real finding count is not a stable assertion, and a clean result here is indistinguishable
+  # from nothing having been resolved. The detection job below is what proves detection.
+  vuln-scan-pulse-oss-positive:
+    name: Vulnerability scan (Pulse OSS) — positive
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/vuln-scan-pulse-oss.yml
+    with:
+      nspect_id: ${{ vars.NSPECT_ID }}
+      scan_mode: rapid
+      failure_policy: report-only
+
+  # NEGATIVE (detection): ci_test_setup plants a manifest pinning a dependency with published
+  # advisories, so a zero-finding result is a defect rather than good news. report-only keeps
+  # the job GREEN; the assertion below is what converts a silent zero into a hard error.
+  vuln-scan-pulse-oss-detection:
+    name: Vulnerability scan (Pulse OSS) — negative (must report findings, staying green)
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/vuln-scan-pulse-oss.yml
+    with:
+      nspect_id: ${{ vars.NSPECT_ID }}
+      scan_mode: rapid
+      failure_policy: report-only
+      ci_test_setup: true
+      scan_path: .pulse-oss-selftest
+      build: true  # Maven resolves its dependency graph only through a build
+      upload_report: true
+
+  vuln-scan-assert-outcomes:
+    name: Vulnerability scan — assert both outcomes
+    needs: [vuln-scan-pulse-oss-positive, vuln-scan-pulse-oss-detection]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require a completed positive scan and a detected finding
+        env:
+          POSITIVE_MODE: ${{ needs.vuln-scan-pulse-oss-positive.outputs.resolved_mode }}
+          POSITIVE_EXIT: ${{ needs.vuln-scan-pulse-oss-positive.outputs.scanner_exit_code }}
+          DETECTION_COUNT: ${{ needs.vuln-scan-pulse-oss-detection.outputs.finding_count }}
+        run: |
+          set -euo pipefail
+          failures=0
+          if [ "$POSITIVE_MODE" != rapid ]; then
+            echo "::error::The positive scan resolved to '${POSITIVE_MODE}', not rapid. A self-test must not create backend state."
+            failures=$((failures + 1))
+          fi
+          if [ "$POSITIVE_EXIT" != 0 ]; then
+            echo "::error::The positive scan reported scanner exit '${POSITIVE_EXIT}'."
+            failures=$((failures + 1))
+          fi
+          if ! [[ "$DETECTION_COUNT" =~ ^[0-9]+$ ]] || (( DETECTION_COUNT < 1 )); then
+            echo "::error::The vulnerable fixture reported '${DETECTION_COUNT:-nothing}'. A clean result here means the scan resolved no components, not that the dependency is safe."
+            failures=$((failures + 1))
+          fi
+          [ "$failures" -eq 0 ] || exit 1
+          echo "::notice::Transport proven (positive scan completed) and detection proven (${DETECTION_COUNT} finding(s) from the controlled fixture)."
+
+  # Suite passthrough for the vulnerability scan. Separate from security-suite-dogfood, which
+  # stays behind ENABLE_PULSE_INTEGRATION for the secret scan.
+  security-suite-vuln-dogfood:
+    name: Security suite (vulnerability scan) — self test
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/security-suite.yml
+    with:
+      enable-vuln-scan: true
+      nspect-id: ${{ vars.NSPECT_ID }}
+      vuln-scan-mode: rapid
+      vuln-failure-policy: report-only
