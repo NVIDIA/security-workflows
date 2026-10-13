@@ -448,12 +448,23 @@ jobs:
             policy_flag=--fail
           fi
 
+          # The same registration identity is supplied twice, as flags and as PULSE_* in the
+          # container environment, because the two scanner generations do not agree on which
+          # one they read: the build that was green on 2026-09-30 honoured the flags, and
+          # newer builds reject the same registration unless the environment is set as well.
+          # Passing both keeps either generation working. Matches how the reference harness
+          # in nSpect-github-first-poc-test-1 invokes the CLI.
+          export PULSE_NSPECT_ID="$INPUT_NSPECT_ID"
+          export PULSE_REPO_URL="ssh://git@github.com/${GITHUB_REPOSITORY}.git"
+          export PULSE_REPO_BRANCH="$INPUT_REGISTERED_BRANCH"
+          export PULSE_CHARON_URL="http://127.0.0.1:${CHARON_LOCAL_PORT}"
+
           command=(
             pulse --no-echo --no-color --timeout "$INPUT_TIMEOUT"
-            --charon-url "http://127.0.0.1:${CHARON_LOCAL_PORT}"
-            --nspect-id "$INPUT_NSPECT_ID"
-            --repo-url "ssh://git@github.com/${GITHUB_REPOSITORY}.git"
-            --repo-branch "$INPUT_REGISTERED_BRANCH"
+            --charon-url "$PULSE_CHARON_URL"
+            --nspect-id "$PULSE_NSPECT_ID"
+            --repo-url "$PULSE_REPO_URL"
+            --repo-branch "$PULSE_REPO_BRANCH"
           )
           if [[ "$RESOLVED_MODE" == persistent ]]; then
             command+=(
@@ -482,6 +493,10 @@ jobs:
             --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             --env CI=true \
             --env GITHUB_ACTIONS=true \
+            --env PULSE_NSPECT_ID \
+            --env PULSE_REPO_URL \
+            --env PULSE_REPO_BRANCH \
+            --env PULSE_CHARON_URL \
             --volume "$GITHUB_WORKSPACE:/workspace:ro" \
             "$SCANNER_IMAGE_REF" \
             "${command[@]}" >/dev/null
