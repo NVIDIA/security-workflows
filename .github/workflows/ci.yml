@@ -1285,11 +1285,11 @@ jobs:
           set -uo pipefail
           failures=0
 
-          # run <secret> <vuln> <sast> <languages> -> sets $code
+          # run_preflight <secret> <vuln> <malware> <sast> <nspect-id> <languages> -> sets $code
           run_preflight() {
             code=0
-            ENABLE_SECRET_SCAN="$1" ENABLE_VULN_SCAN="$2" ENABLE_SAST_SCAN="$3" \
-              SAST_LANGUAGES="$4" \
+            ENABLE_SECRET_SCAN="$1" ENABLE_VULN_SCAN="$2" ENABLE_MALWARE_SCAN="$3" \
+              ENABLE_SAST_SCAN="$4" NSPECT_ID="$5" SAST_LANGUAGES="$6" \
               bash "$PREFLIGHT" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
           }
 
@@ -1318,7 +1318,7 @@ jobs:
           }
 
           # A suite that enables nothing warns and stays green — it is useless, not broken.
-          run_preflight false false false ''
+          run_preflight false false false false '' ''
           if [ "$code" -ne 0 ]; then
             echo "::error::an empty suite selection must warn, not fail"; failures=$((failures+1))
           elif ! grep -q '::warning::' "$RUNNER_TEMP/log.txt"; then
@@ -1327,12 +1327,27 @@ jobs:
             echo "✓ an empty suite selection warns and stays green"
           fi
 
-          expect_pass "enable-vuln-scan needs no companion input" false true false ''
-          expect_pass "a complete SAST selection is accepted" false false true '["actions"]'
-          expect_pass "secret-only needs no companion input"  true  false false ''
+          expect_pass "enable-vuln-scan needs no companion input" false true  false false '' ''
+          expect_pass "a complete malware selection is accepted"  false false true  false NSPECT-ABCD-1234 ''
+          expect_pass "a complete SAST selection is accepted"     false false false true  '' '["actions"]'
+          expect_pass "secret-only needs no companion input"      true  false false false '' ''
 
+          expect_fail "enable-malware-scan without an nSpect id is refused" \
+            nspect-id             false false true  false '' ''
           expect_fail "enable-sast-scan without languages is refused" \
-            sast-languages        false false true  ''
+            sast-languages        false false false true  '' ''
+
+          # Both missing inputs are reported in a single run.
+          run_preflight false false true true '' ''
+          if [ "$code" -eq 0 ]; then
+            echo "::error::two missing companion inputs must fail"; failures=$((failures+1))
+          elif ! grep -qF nspect-id "$RUNNER_TEMP/log.txt" \
+             || ! grep -qF sast-languages "$RUNNER_TEMP/log.txt"; then
+            echo "::error::both missing companion inputs must be named in one run"
+            cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1))
+          else
+            echo "✓ two missing companion inputs are both named in one run"
+          fi
 
           if [ "$failures" -ne 0 ]; then
             echo "::error::${failures} preflight case(s) failed"
@@ -1438,3 +1453,754 @@ jobs:
       enable-vuln-scan: true
       vuln-scan-mode: rapid
       vuln-failure-policy: report-only
+
+  # ============================================================================
+  # Malware scan (Pulse) — contract tests.
+  #
+  # Runs the four gate scripts extracted by step name from malware-scan-pulse.yml. Covers what
+  # a live scan cannot: rejection paths, every exit-code and report-status pairing, and
+  # blocking verdicts, whose expected outcome is a failing job.
+  # ============================================================================
+  malware-scan-contract:
+    name: Malware scan — contract tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Extract the gates from malware-scan-pulse.yml
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import os, pathlib, yaml
+          workflow = yaml.safe_load(pathlib.Path(".github/workflows/malware-scan-pulse.yml").read_text())
+          job = workflow["jobs"]["pulse-malware"]
+          steps = {step["name"]: step for step in job["steps"]}
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          for filename, step_name in {
+              "contract.sh": "Validate scan contract",
+              "classify.sh": "Classify scan result",
+              "report.sh": "Validate scan report",
+              "enforce.sh": "Enforce scan result",
+          }.items():
+              # A renamed step raises KeyError rather than leaving its gate untested.
+              (temp / filename).write_text(steps[step_name]["run"])
+          # Read the allowed registry from the workflow rather than duplicating it.
+          (temp / "job-env.sh").write_text(
+              "ALLOWED_REGISTRY=%s\n" % job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"])
+          PY
+          for f in contract.sh classify.sh report.sh enforce.sh job-env.sh; do
+            test -s "$RUNNER_TEMP/$f"
+          done
+
+      - name: Assert the scan contract accepts and rejects the right inputs
+        env:
+          CONTRACT: ${{ runner.temp }}/contract.sh
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC1091
+          . "$RUNNER_TEMP/job-env.sh"
+          failures=0
+          # Placeholder namespace: the guard checks only the registry host, and the internal
+          # path is kept out of this public repository.
+          IMAGE_PATH="${ALLOWED_REGISTRY}/0000000000000000/pulse/pulse-malware-scanner-cli"
+          GOOD_IMAGE="${IMAGE_PATH}:1.2.0-alpha6"
+          GOOD_SHA=0123456789abcdef0123456789abcdef01234567
+
+          # Each case starts from a valid contract and overrides only the field under test.
+          reset_case() {
+            EVENT=push; REPOSITORY=NVIDIA/security-workflows; SHA="$GOOD_SHA"
+            IMAGE_REF="$GOOD_IMAGE"; CLIENT_VERSION=auto
+            OIDC_URL=https://oidc.example.invalid/token; OIDC_TOKEN=placeholder-not-a-real-token
+            VAULT_URL=https://vault.example.invalid
+            CHARON_PROXY=proxy.example.invalid:443
+            CHARON_JOIN=charon-test-token; CHARON_APP=charon-test-app; CHARON_PORT=8888
+            NSPECT_ID=NSPECT-ABCD-1234; FAILURE_POLICY=strict
+          }
+
+          run_contract() {
+            : > "$RUNNER_TEMP/out.txt"
+            : > "$RUNNER_TEMP/env.txt"
+            code=0
+            GITHUB_EVENT_NAME="$EVENT" GITHUB_REPOSITORY="$REPOSITORY" GITHUB_SHA="$SHA" \
+            GITHUB_ENV="$RUNNER_TEMP/env.txt" GITHUB_OUTPUT="$RUNNER_TEMP/out.txt" \
+            ACTIONS_ID_TOKEN_REQUEST_URL="$OIDC_URL" \
+            ACTIONS_ID_TOKEN_REQUEST_TOKEN="$OIDC_TOKEN" \
+            SCANNER_IMAGE_REF="$IMAGE_REF" SCANNER_IMAGE_ALLOWED_REGISTRY="$ALLOWED_REGISTRY" \
+            CHARON_CLIENT_VERSION="$CLIENT_VERSION" \
+            NV_VAULT_URL="$VAULT_URL" NVCR_VAULT_ROLE=role NVCR_VAULT_JWT_PATH=jwt-path \
+            NVCR_VAULT_NAMESPACE=namespace NVCR_VAULT_SECRET_PATH=secret/path \
+            CHARON_PROXY_SERVER="$CHARON_PROXY" \
+            CHARON_JOIN_TOKEN="$CHARON_JOIN" CHARON_APP_NAME="$CHARON_APP" \
+            CHARON_LOCAL_PORT="$CHARON_PORT" \
+            INPUT_NSPECT_ID="$NSPECT_ID" INPUT_FAILURE_POLICY="$FAILURE_POLICY" \
+              bash "$CONTRACT" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          # contract_value <key> [out|env] — the step's outputs, or what it exported.
+          contract_value() { sed -n "s/^$1=//p" "$RUNNER_TEMP/${2:-out}.txt"; }
+
+          # expect_ok <name> [<key> <expected-value> [out|env]]
+          expect_ok() {
+            local name="$1" key="${2:-}" want="${3:-}" file="${4:-out}"
+            run_contract
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected the contract to accept this, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            if [ -n "$key" ]; then
+              local got; got="$(contract_value "$key" "$file")"
+              if [ "$got" != "$want" ]; then
+                echo "::error::${name}: ${key} was '${got}', expected '${want}'"
+                failures=$((failures+1)); return
+              fi
+              echo "✓ ${name} (${key}=${got})"; return
+            fi
+            echo "✓ ${name}"
+          }
+
+          # expect_rejected <name> <expected error substring>
+          expect_rejected() {
+            local name="$1" needle="$2"
+            run_contract
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the contract to reject this, but it succeeded"
+              failures=$((failures+1)); return
+            fi
+            if ! grep -q '::error::' "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${name}: failed without an actionable ::error:: message"
+              failures=$((failures+1)); return
+            fi
+            if ! grep -qF "$needle" "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${name}: error did not mention '${needle}'. Got: $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt")"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} — $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt" | sed 's/^::error:://' | cut -c1-110)"
+          }
+
+          reset_case; expect_ok "the scan target is this run's repository" \
+            repository_uri git@github.com:NVIDIA/security-workflows.git
+          reset_case; expect_ok "the scan target is this run's commit" commit_sha "$GOOD_SHA"
+          reset_case; FAILURE_POLICY=malicious-only
+          expect_ok  "failure_policy malicious-only is accepted"
+          reset_case; CLIENT_VERSION=17.1.2
+          expect_ok  "a pinned tunnel client version is accepted"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:1.2.0"
+          expect_ok  "an alternative valid tag is accepted"
+
+          # Two calls in one run must not collide on artifact or container names.
+          reset_case; run_contract; first="$(contract_value call_id)"
+          run_contract; second="$(contract_value call_id)"
+          if ! [[ "$first" =~ ^[0-9a-f]{8}$ ]] || [ "$first" = "$second" ]; then
+            echo "::error::call_id must be 8 hex characters and differ per call; got '${first}' then '${second}'"
+            failures=$((failures+1))
+          else
+            echo "✓ each call draws its own call_id (${first}, ${second})"
+          fi
+
+          # Fork-authored code must never reach a job holding OIDC.
+          reset_case; EVENT=pull_request
+          expect_rejected "pull_request is refused"        "not a trusted trigger"
+          reset_case; EVENT=pull_request_target
+          expect_rejected "pull_request_target is refused" "not a trusted trigger"
+
+          # A missing variable is named before the Vault action or the tunnel fails on it.
+          reset_case; VAULT_URL=
+          expect_rejected "a missing Vault variable is named" "NV_VAULT_URL"
+          reset_case; CHARON_PROXY=
+          expect_rejected "a missing Charon proxy variable is named" \
+            "Missing Actions variable(s): CHARON_PROXY_SERVER."
+
+          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-malware-scanner-cli:1.2.0"
+          expect_rejected "a foreign registry is rejected"        "hosted on"
+          # The registry match is anchored and its dot is literal.
+          reset_case; IMAGE_REF="registry.invalid/${GOOD_IMAGE}"
+          expect_rejected "the allowed host behind another host is rejected" "hosted on"
+          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-malware-scanner-cli:1.2.0"
+          expect_rejected "a lookalike host is rejected"          "hosted on"
+          reset_case; IMAGE_REF=":1.2.0"
+          expect_rejected "an unset image variable is rejected"   "MALWARE_SCAN_PULSE_IMAGE"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:"
+          expect_rejected "an unset tag variable is rejected"     "MALWARE_SCAN_PULSE_IMAGE_TAG"
+          # A tag cannot carry a second reference.
+          reset_case; IMAGE_REF="${IMAGE_PATH}:latest@sha256:${GOOD_SHA}${GOOD_SHA:0:24}"
+          expect_rejected "a tag smuggling a digest is rejected"  "carry a valid tag"
+
+          reset_case; CLIENT_VERSION=latest
+          expect_rejected "a non-semver tunnel client version is rejected" "bare semantic version"
+          reset_case; CLIENT_VERSION=1.2.3-..%2Fevil
+          expect_rejected "a traversal in the client version is rejected"  "bare semantic version"
+
+          # Charon values are interpolated into tbot's YAML config and must match their shapes.
+          reset_case; CHARON_PROXY=proxy.example.invalid:99999
+          expect_rejected "a Charon proxy port above the TCP range is rejected" "port from 1 to 65535"
+          reset_case; CHARON_PROXY=proxy.example.invalid/path:443
+          expect_rejected "a malformed Charon proxy is rejected" \
+            "CHARON_PROXY_SERVER must be a host:port value"
+          reset_case; CHARON_PROXY=proxy.example.invalid
+          expect_rejected "a Charon proxy without a port is rejected" \
+            "CHARON_PROXY_SERVER must be a host:port value"
+          reset_case; CHARON_JOIN="$(printf 'charon\nrunners')"
+          expect_rejected "a Charon join token with a control character is rejected" "JOIN_TOKEN"
+          reset_case; CHARON_APP="-charon"
+          expect_rejected "a Charon app name with a leading dash is rejected" "APP_NAME"
+          reset_case; CHARON_PORT=80
+          expect_rejected "a privileged Charon local port is rejected" "unprivileged TCP port"
+          reset_case; CHARON_PORT=not-a-port
+          expect_rejected "a non-numeric Charon local port is rejected" "unprivileged TCP port"
+
+          reset_case; OIDC_URL=
+          expect_rejected "a caller without id-token: write is rejected" "id-token: write"
+
+          reset_case; NSPECT_ID=NSPECT-BAD
+          expect_rejected "a malformed nSpect id is rejected" "must be a valid nSpect ID"
+          # The CLI accepts uppercase IDs only.
+          reset_case; NSPECT_ID=NSPECT-abcd-1234
+          expect_rejected "a lowercase nSpect id is rejected" "must be a valid nSpect ID"
+          reset_case; FAILURE_POLICY=warn
+          expect_rejected "an unknown failure_policy is rejected" "failure_policy must be"
+
+          # The scan target comes from the run context but is still validated before the
+          # service clones it.
+          reset_case; SHA=0123456
+          expect_rejected "an abbreviated commit SHA is rejected" "full 40-character commit SHA"
+          reset_case; REPOSITORY=NVIDIA/nested/path
+          expect_rejected "a nested repository path is rejected" "not a repository the scanner accepts"
+          reset_case; REPOSITORY=NVIDIA/..
+          expect_rejected "a dot-dot repository name is rejected" "not a repository the scanner accepts"
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} contract case(s) failed"
+            exit 1
+          fi
+          echo "All contract cases passed."
+
+      - name: Assert classification reconciles the exit code with the report
+        env:
+          CLASSIFY: ${{ runner.temp }}/classify.sh
+        run: |
+          set -uo pipefail
+          failures=0
+          cases="$RUNNER_TEMP/classify-cases"
+          rm -rf "$cases"
+
+          # Credential-shaped fixtures are generated at run time so the repository's secret scan
+          # has nothing to flag.
+          python3 - "$cases" <<'PY'
+          import base64, json, pathlib, sys
+
+          def b64(raw):
+              return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+          jwt = ".".join(b64(part) for part in (
+              '{"alg":"HS256","typ":"JWT"}', '{"sub":"contract-test"}', "not-a-real-signature"))
+          opaque = b64("contract-test-value-not-a-real-credential")
+          cli_log = json.dumps({"level": "info", "msg": "source-code scan submitted",
+                                "scan_id": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+                                "versionCLI": "1.2.0-alpha6"}) + "\n"
+          cases = {
+              # name: (report status, or None for no report; raw scanner output)
+              "clean": ("CLEAN", "✅\tFetched report for source-code malware scan."),
+              "malicious": ("MALICIOUS", "✅\tVerified nSpect ID 'NSPECT-ABCD-1234'.\n"
+                                         "❌\tSource-code scan is MALICIOUS."),
+              "suspicious": ("SUSPICIOUS", "❌\tSource-code scan is SUSPICIOUS."),
+              "failed": ("FAILED", "❌\tSource-code scan FAILED."),
+              "analyzing": ("ANALYZING", "❌\tSource-code scan has unknown status: ANALYZING"),
+              "injected": ("CLEAN\nverdict=MALICIOUS", "✅\tFetched report."),
+              "no-report": (None, "❌\tFailed to submit source-code scan request."),
+              "connectivity": (None, "❌\tFailed to connect to dependent services."),
+              "panic": (None, "panic: output-dir must be set with equals sign\n\n"
+                              "goroutine 1 [running]:"),
+              "old-image": (None, 'Error: unknown command "source-code-scan" for '
+                                  '"pulse-malware-scanner-cli"'),
+              "leaky": (None, "❌\tnSpect ID 'NSPECT-ABCD-1234' rejected: Authorization: Bearer "
+                              + opaque + " with token " + jwt),
+          }
+          root = pathlib.Path(sys.argv[1])
+          for name, (status, raw) in cases.items():
+              directory = root / name
+              directory.mkdir(parents=True)
+              if status is not None:
+                  (directory / "malware_report.json").write_text(
+                      json.dumps({"success": True, "data": {"status": status, "report": []}}))
+              (directory / "pulse-cli.log").write_text(cli_log)
+              (directory / "raw.log").write_text(raw + "\n")
+          malformed = root / "malformed"
+          malformed.mkdir(parents=True)
+          (malformed / "malware_report.json").write_text("{not json")
+          (malformed / "raw.log").write_text("\n")
+
+          # A distinct value per position, so a leaked value identifies the pattern that missed it.
+          fake = {name: b64(f"contract-test-{name}") for name in (
+              "token", "proxy", "session", "csrf", "cookie", "amz-credential", "amz-signature",
+              "amz-security-token", "goog-credential", "goog-signature", "azure-signature",
+              "cli-authorization", "cli-cookie")}
+          fake["basic"] = base64.b64encode(b"contract-test-user:contract-test-pass").decode()
+          headers = root / "headers"
+          headers.mkdir(parents=True)
+          (headers / "raw.log").write_text("\n".join((
+              "❌\tFailed to connect to dependent services.",
+              "Authorization: Basic " + fake["basic"],
+              "Authorization: Token " + fake["token"],
+              "Proxy-Authorization: Bearer " + fake["proxy"],
+              f"Cookie: session={fake['session']}; csrftoken={fake['csrf']}",
+              f"Set-Cookie: auth={fake['cookie']}; HttpOnly; Secure",
+              "Download: https://objects.example.invalid/blob"
+              f"?X-Amz-Credential={fake['amz-credential']}&X-Amz-Signature={fake['amz-signature']}"
+              f"&X-Amz-Security-Token={fake['amz-security-token']}",
+              "GCS: https://storage.example.invalid/blob"
+              f"?X-Goog-Credential={fake['goog-credential']}&X-Goog-Signature={fake['goog-signature']}",
+              f"Azure: https://blob.example.invalid/blob?sig={fake['azure-signature']}&se=2099-01-01",
+          )) + "\n")
+          (headers / "pulse-cli.log").write_text(cli_log + json.dumps({
+              "level": "error", "msg": "request failed",
+              "authorization": "Bearer " + fake["cli-authorization"],
+              "cookie": "session=" + fake["cli-cookie"]}) + "\n")
+          (root / "headers.forbidden").write_text("\n".join(fake.values()) + "\n")
+          PY
+
+          # run_classify <case> <scanner-exit> -> sets $code
+          run_classify() {
+            : > "$RUNNER_TEMP/out.txt"
+            code=0
+            SCANNER_EXIT="$2" PULSE_MALWARE_OUTPUT_DIR="$cases/$1" \
+              PULSE_MALWARE_RAW_LOG="$cases/$1/raw.log" INPUT_NSPECT_ID=NSPECT-ABCD-1234 \
+              GITHUB_OUTPUT="$RUNNER_TEMP/out.txt" \
+              bash "$CLASSIFY" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          classify_output() { sed -n "s/^$1=//p" "$RUNNER_TEMP/out.txt"; }
+
+          # expect_class <name> <case> <scanner-exit> <completed>/<verdict>/<category>
+          expect_class() {
+            local name="$1" want="$4"
+            run_classify "$2" "$3"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: classification itself failed, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            local got
+            got="$(classify_output completed)/$(classify_output verdict)/$(classify_output diagnostic_category)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::${name}: got ${got}, expected ${want}"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} (${got})"
+          }
+
+          # A verdict stands only where the exit code and the report agree.
+          expect_class "exit 0 with a CLEAN report is a CLEAN verdict" \
+            clean 0 true/CLEAN/none
+          expect_class "exit 5 with a MALICIOUS report is a MALICIOUS verdict" \
+            malicious 5 true/MALICIOUS/none
+          expect_class "exit 5 with a SUSPICIOUS report is a SUSPICIOUS verdict" \
+            suspicious 5 true/SUSPICIOUS/none
+          # Exit 5 is shared, so only the report can tell a failed scan from a detection.
+          expect_class "exit 5 with a FAILED report is a scan failure" \
+            failed 5 false/FAILED/scan-failed
+          expect_class "exit 5 without a report is a scan error" \
+            no-report 5 false/unavailable/scan-error
+          expect_class "exit 5 with a malformed report is a scan error" \
+            malformed 5 false/unavailable/scan-error
+          expect_class "exit 5 with a status the CLI does not know is unexpected" \
+            analyzing 5 false/ANALYZING/unexpected-status
+          # Disagreement fails closed in both directions.
+          expect_class "exit 0 with a MALICIOUS report does not stand" \
+            malicious 0 false/MALICIOUS/unexpected-status
+          expect_class "exit 5 with a CLEAN report does not stand" \
+            clean 5 false/CLEAN/unexpected-status
+          expect_class "exit 0 without a report does not pass" \
+            no-report 0 false/unavailable/report-unavailable
+          expect_class "a status that is not a bare word is unrecognized" \
+            injected 0 false/unrecognized/unexpected-status
+          expect_class "exit 2 is a backend connectivity failure" \
+            connectivity 2 false/unavailable/backend-connectivity
+          expect_class "a panic is a crash, not a connectivity failure" \
+            panic 2 false/unavailable/scanner-crashed
+          expect_class "exit 4 is a timeout" \
+            no-report 4 false/unavailable/timeout
+          expect_class "exit 6 is a configuration or authorization error" \
+            no-report 6 false/unavailable/configuration-or-authorization-error
+          expect_class "an image without source-code-scan is named as such" \
+            old-image 1 false/unavailable/scanner-version-unsupported
+          expect_class "any other exit is a scanner error" \
+            no-report 1 false/unavailable/scanner-error
+
+          run_classify injected 0
+          if [ "$(grep -c '^verdict=' "$RUNNER_TEMP/out.txt")" -ne 1 ]; then
+            echo "::error::a multi-line report status must not add step outputs"
+            failures=$((failures+1))
+          else
+            echo "✓ a multi-line report status adds no step outputs"
+          fi
+
+          # Clear the copy kept by the earlier disagreeing-exit-code case.
+          rm -f "$cases/clean/scanner-output.log" "$cases/clean/pulse-cli.sanitized.log"
+          run_classify clean 0
+          if [ "$(classify_output scan_id)" != 0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0 ] \
+            || [ "$(classify_output scanner_version)" != 1.2.0-alpha6 ]; then
+            echo "::error::the Pulse scan ID and scanner version must be read from pulse-cli.log"
+            failures=$((failures+1))
+          elif [ -e "$cases/clean/scanner-output.log" ]; then
+            echo "::error::a CLEAN verdict must not keep a copy of the scanner output"
+            failures=$((failures+1))
+          else
+            echo "✓ a CLEAN scan records the audit join key and keeps no output copy"
+          fi
+
+          run_classify malicious 5
+          if ! grep -q '::stop-commands::' "$RUNNER_TEMP/log.txt"; then
+            echo "::error::scanner output must be printed with workflow commands stopped"
+            failures=$((failures+1))
+          elif grep -qF NSPECT-ABCD-1234 "$cases/malicious/scanner-output.log" "$RUNNER_TEMP/log.txt"; then
+            echo "::error::the nSpect ID must be redacted from the kept and the printed scanner output"
+            failures=$((failures+1))
+          else
+            echo "✓ a detection prints redacted scanner output with workflow commands stopped"
+          fi
+
+          run_classify leaky 6
+          if grep -qE 'eyJ|Bearer [^[]|NSPECT-ABCD-1234' \
+            "$cases/leaky/scanner-output.log" "$RUNNER_TEMP/log.txt"; then
+            echo "::error::credential-shaped scanner output must be redacted before it is kept or printed"
+            failures=$((failures+1))
+          elif ! grep -q '^::error::Scanner: ' "$RUNNER_TEMP/log.txt"; then
+            echo "::error::a failed scan must surface an ::error:: excerpt"
+            failures=$((failures+1))
+          else
+            echo "✓ a failed scan surfaces a redacted ::error:: excerpt"
+          fi
+
+          # Fully redacted output is kept; it is withheld only if a credential survives redaction.
+          run_classify headers 2
+          kept=("$cases/headers/scanner-output.log" "$cases/headers/pulse-cli.sanitized.log")
+          if grep -qF -f "$cases/headers.forbidden" "${kept[@]}" "$RUNNER_TEMP/log.txt"; then
+            echo "::error::header, cookie and signed-URL credentials must be redacted before they are kept or printed"
+            failures=$((failures+1))
+          elif grep -q 'output suppressed' "${kept[@]}"; then
+            echo "::error::fully redacted output must be kept, not withheld as if a credential survived"
+            failures=$((failures+1))
+          elif ! grep -qF 'Authorization: Basic [REDACTED]' "${kept[0]}" \
+            || ! grep -qF 'Cookie: [REDACTED]' "${kept[0]}" \
+            || grep -qF '[REDACTED]]' "${kept[@]}"; then
+            echo "::error::each credential must be replaced in place by a single [REDACTED] marker"
+            failures=$((failures+1))
+          else
+            echo "✓ header, cookie and signed-URL credentials are redacted in place, not withheld"
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} classification case(s) failed"
+            exit 1
+          fi
+          echo "All classification cases passed."
+
+      - name: Assert the report validator counts, redacts and fails closed
+        env:
+          REPORT_GATE: ${{ runner.temp }}/report.sh
+        run: |
+          set -uo pipefail
+          failures=0
+          fixtures="$RUNNER_TEMP/report-fixtures"
+          rm -rf "$fixtures"
+
+          # Credential-shaped fixtures are generated at run time so the repository's secret scan
+          # has nothing to flag.
+          python3 - "$fixtures" <<'PY'
+          import base64, json, pathlib, sys
+
+          def b64(raw):
+              return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+          jwt = ".".join(b64(part) for part in (
+              '{"alg":"HS256","typ":"JWT"}', '{"sub":"contract-test"}', "not-a-real-signature"))
+
+          def report(status, items=None, **extra):
+              data = {"status": status, "metadata": {"nspect_id": "NSPECT-ABCD-1234"}, **extra}
+              if items is not None:
+                  data["report"] = items
+              return {"success": True, "data": data}
+
+          fixtures = {
+              "clean": report("CLEAN", allowlist_applied=True, cache_info={"is_cached": True}),
+              "malicious": report("MALICIOUS", [
+                  {"classification": "MALICIOUS"}, {"classification": "malicious"},
+                  {"classification": "SUSPICIOUS"}, {"classification": "GOODWARE"},
+                  {"classification": None}]),
+              "status-mismatch": report("MALICIOUS", []),
+              "no-data": {"success": False, "errors": ["upstream"]},
+              "items-not-a-list": report("CLEAN", {"classification": "GOODWARE"}),
+              "credential-key": report("CLEAN", [{"classification": "GOODWARE",
+                                                  "api_token": "redacted-by-test"}]),
+              "jwt-value": report("CLEAN", [{"classification": "GOODWARE", "evidence": jwt}]),
+          }
+          root = pathlib.Path(sys.argv[1])
+          for name, payload in fixtures.items():
+              directory = root / name
+              directory.mkdir(parents=True)
+              (directory / "malware_report.json").write_text(json.dumps(payload))
+          (root / "missing").mkdir(parents=True)
+          malformed = root / "malformed"
+          malformed.mkdir(parents=True)
+          (malformed / "malware_report.json").write_text("{not json")
+          PY
+
+          # run_gate <fixture> <expected-verdict> [upload-report] -> sets $code
+          run_gate() {
+            : > "$RUNNER_TEMP/out.txt"
+            code=0
+            PULSE_MALWARE_OUTPUT_DIR="$fixtures/$1" EXPECTED_VERDICT="$2" \
+              INPUT_UPLOAD_REPORT="${3:-false}" INPUT_NSPECT_ID=NSPECT-ABCD-1234 \
+              GITHUB_OUTPUT="$RUNNER_TEMP/out.txt" \
+              bash "$REPORT_GATE" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          gate_output() { sed -n "s/^$1=//p" "$RUNNER_TEMP/out.txt"; }
+
+          # expect_accepted <name> <fixture> <verdict> <flagged> <breakdown>
+          expect_accepted() {
+            local name="$1" want_count="$4" want_breakdown="$5"
+            run_gate "$2" "$3"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected acceptance, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            local got_count got_breakdown
+            got_count="$(gate_output flagged_count)"
+            got_breakdown="$(gate_output classification_breakdown)"
+            if [ "$got_count" != "$want_count" ] || [ "$got_breakdown" != "$want_breakdown" ]; then
+              echo "::error::${name}: got count='${got_count}' breakdown='${got_breakdown}', expected count='${want_count}' breakdown='${want_breakdown}'"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} (${got_count} flagged; ${got_breakdown})"
+          }
+
+          # expect_refused <name> <fixture> <verdict>
+          expect_refused() {
+            local name="$1"
+            run_gate "$2" "$3"
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the validator to refuse this report, but it passed"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} — $(grep -m1 '::error::' "$RUNNER_TEMP/log.txt" | sed 's/^.*::error:://' | cut -c1-110)"
+          }
+
+          expect_accepted "a CLEAN report with no items" clean CLEAN 0 "no items reported"
+          expect_accepted "classifications are tallied case-insensitively" malicious MALICIOUS 3 \
+            "goodware: 1, malicious: 2, suspicious: 1, unspecified: 1"
+
+          run_gate clean CLEAN
+          if [ "$(gate_output allowlist_applied)/$(gate_output cached)" != true/true ]; then
+            echo "::error::the allowlist and cache state must be read from the report"
+            failures=$((failures+1))
+          else
+            echo "✓ the allowlist and cache state are read from the report"
+          fi
+
+          expect_refused "a missing report"                    missing CLEAN
+          expect_refused "a malformed report"                  malformed CLEAN
+          expect_refused "a report without a data object"      no-data CLEAN
+          expect_refused "a report status that contradicts the verdict" status-mismatch CLEAN
+          expect_refused "report items that are not a list"    items-not-a-list CLEAN
+
+          # The artifact copy is written only on request, with the nSpect ID redacted, and never
+          # for a credential-shaped report.
+          run_gate malicious MALICIOUS false
+          if [ "$(gate_output artifact_ready)" != false ] \
+            || [ -e "$fixtures/malicious/malware-scan-report.json" ]; then
+            echo "::error::no artifact copy may be written unless upload_report is true"
+            failures=$((failures+1))
+          else
+            echo "✓ no artifact copy is written without upload_report"
+          fi
+          run_gate malicious MALICIOUS true
+          if [ "$(gate_output artifact_ready)" != true ]; then
+            echo "::error::upload_report must produce an artifact copy"
+            failures=$((failures+1))
+          elif grep -qF NSPECT-ABCD-1234 "$fixtures/malicious/malware-scan-report.json"; then
+            echo "::error::the artifact copy must not carry the nSpect ID"
+            failures=$((failures+1))
+          else
+            echo "✓ the artifact copy is written with the nSpect ID redacted"
+          fi
+          for fixture in credential-key jwt-value; do
+            run_gate "$fixture" CLEAN true
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${fixture}: a credential-shaped report must withhold the artifact, not fail the verdict"
+              failures=$((failures+1))
+            elif [ "$(gate_output artifact_ready)" != false ] \
+              || [ -e "$fixtures/$fixture/malware-scan-report.json" ]; then
+              echo "::error::${fixture}: a credential-shaped report must not reach an artifact"
+              failures=$((failures+1))
+            elif ! grep -q '::warning::' "$RUNNER_TEMP/log.txt"; then
+              echo "::error::${fixture}: withholding the artifact must warn"
+              failures=$((failures+1))
+            else
+              echo "✓ ${fixture}: the artifact is withheld with a warning and the verdict stands"
+            fi
+          done
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} report-validation case(s) failed"
+            exit 1
+          fi
+          echo "All report-validation cases passed."
+
+      - name: Assert enforcement blocks and warns per failure_policy
+        env:
+          ENFORCE: ${{ runner.temp }}/enforce.sh
+        run: |
+          set -uo pipefail
+          failures=0
+
+          # run_enforce <policy> <scanner-exit> <completed> <verdict> <report-status> [category]
+          run_enforce() {
+            code=0
+            FAILURE_POLICY="$1" SCANNER_EXIT="$2" SCAN_COMPLETED="$3" VERDICT="$4" \
+              REPORT_STATUS="$5" DIAGNOSTIC_CATEGORY="${6:-none}" FLAGGED_COUNT=2 \
+              bash "$ENFORCE" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
+          }
+
+          # expect <pass|fail> <name> <run_enforce arguments...>
+          expect() {
+            local want="$1" name="$2"; shift 2
+            run_enforce "$@"
+            if [ "$want" = pass ] && [ "$code" -ne 0 ]; then
+              echo "::error::${name}: expected the job to pass, exited ${code}"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            if [ "$want" = fail ] && [ "$code" -eq 0 ]; then
+              echo "::error::${name}: expected the job to FAIL, but enforcement passed it"
+              cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1)); return
+            fi
+            echo "✓ ${name}"
+          }
+
+          # assert_message <name> <substring> <run_enforce arguments...>
+          # Several branches fail closed, so the message identifies which one fired.
+          assert_message() {
+            local name="$1" needle="$2"; shift 2
+            run_enforce "$@"
+            if grep -qF "$needle" "$RUNNER_TEMP/log.txt"; then
+              echo "✓ ${name}"; return
+            fi
+            echo "::error::${name}: expected the outcome to be reported as '${needle}'. Got: $(grep -m1 -E '::(error|warning|notice)::' "$RUNNER_TEMP/log.txt")"
+            failures=$((failures+1))
+          }
+
+          expect pass "strict passes a CLEAN verdict" \
+            strict 0 true CLEAN success
+          expect pass "malicious-only passes a CLEAN verdict" \
+            malicious-only 0 true CLEAN success
+          # Blocking outcomes, which a live job cannot assert.
+          expect fail "strict blocks a SUSPICIOUS verdict" \
+            strict 5 true SUSPICIOUS success
+          expect pass "malicious-only warns on a SUSPICIOUS verdict instead of blocking" \
+            malicious-only 5 true SUSPICIOUS success
+          expect fail "strict blocks a MALICIOUS verdict" \
+            strict 5 true MALICIOUS success
+          expect fail "malicious-only still blocks a MALICIOUS verdict" \
+            malicious-only 5 true MALICIOUS success
+          expect fail "an unrecognized policy blocks a SUSPICIOUS verdict" \
+            warn 5 true SUSPICIOUS success
+
+          # Fail-closed: neither policy may pass a scan without a verdict or a valid report.
+          expect fail "a scan that never ran blocks" \
+            strict "" false unavailable skipped
+          expect fail "a failed scan blocks under strict" \
+            strict 5 false FAILED skipped scan-failed
+          expect fail "a failed scan blocks under malicious-only" \
+            malicious-only 5 false FAILED skipped scan-failed
+          expect fail "a transport failure blocks under malicious-only" \
+            malicious-only 2 false unavailable skipped backend-connectivity
+          expect fail "a CLEAN verdict with an invalid report blocks" \
+            strict 0 true CLEAN failure
+          expect fail "a SUSPICIOUS verdict with an invalid report blocks under malicious-only" \
+            malicious-only 5 true SUSPICIOUS failure
+
+          assert_message "MALICIOUS is named even when the report is invalid" \
+            "MALICIOUS verdict"          malicious-only 5 true MALICIOUS failure
+          assert_message "a strict block names the policy it violated" \
+            "violates failure_policy=strict" strict 5 true SUSPICIOUS success
+          assert_message "malicious-only surfaces a SUSPICIOUS verdict as a warning" \
+            "::warning::"                malicious-only 5 true SUSPICIOUS success
+          assert_message "a CLEAN scan says so explicitly" \
+            "Pulse malware scan: CLEAN." strict 0 true CLEAN success
+          assert_message "a scan without a verdict names its diagnostic category" \
+            "(scan-failed)"              strict 5 false FAILED skipped scan-failed
+          assert_message "a scan that never ran is reported as such" \
+            "did not run to completion"  strict "" false unavailable skipped
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} enforcement case(s) failed"
+            exit 1
+          fi
+          echo "All enforcement cases passed."
+
+  # ============================================================================
+  # Malware scan (Pulse) — live integration.
+  #
+  # Gated on ENABLE_PULSE_INTEGRATION, shared with the secret-scan live jobs. Requires
+  # NSPECT_ID, the CHARON_* variables, an image tag with the source-code-scan command, and a
+  # Charon tenant that lists the triggering ref and the scan's routes.
+  #
+  # Proves transport and a CLEAN verdict only. Detection needs a ProdSec-approved sample,
+  # which cannot sit on a branch this job expects to scan clean.
+  # ============================================================================
+  malware-scan-pulse-positive:
+    name: Malware scan (Pulse) — positive
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      id-token: write
+    uses: ./.github/workflows/malware-scan-pulse.yml
+    with:
+      nspect_id: ${{ vars.NSPECT_ID }}
+
+  malware-scan-assert-outcome:
+    name: Malware scan — assert the verdict reached the caller
+    needs: malware-scan-pulse-positive
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require a CLEAN verdict and the audit join key in the workflow outputs
+        env:
+          VERDICT: ${{ needs.malware-scan-pulse-positive.outputs.verdict }}
+          SCANNER_EXIT: ${{ needs.malware-scan-pulse-positive.outputs.scanner_exit_code }}
+          FLAGGED_COUNT: ${{ needs.malware-scan-pulse-positive.outputs.flagged_count }}
+          SCAN_ID: ${{ needs.malware-scan-pulse-positive.outputs.scan_id }}
+        run: |
+          set -euo pipefail
+          failures=0
+          if [ "$VERDICT" != CLEAN ] || [ "$SCANNER_EXIT" != 0 ] || [ "$FLAGGED_COUNT" != 0 ]; then
+            echo "::error::Expected verdict CLEAN, scanner exit 0 and no flagged items; got '${VERDICT}', '${SCANNER_EXIT}', '${FLAGGED_COUNT}'."
+            failures=$((failures + 1))
+          fi
+          if [ -z "$SCAN_ID" ] || [ "$SCAN_ID" = unavailable ]; then
+            echo "::error::The Pulse scan ID did not reach the caller, so the run cannot be joined to the server-side record."
+            failures=$((failures + 1))
+          fi
+          [ "$failures" -eq 0 ] || exit 1
+          echo "::notice::Transport proven: a CLEAN verdict for this commit reached the caller with Pulse scan ${SCAN_ID}."
+
+  # Suite passthrough for the malware scan, behind the same gate.
+  security-suite-malware-dogfood:
+    name: Security suite (malware scan) — self test
+    if: ${{ vars.ENABLE_PULSE_INTEGRATION == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/security-suite.yml
+    with:
+      enable-malware-scan: true
+      nspect-id: ${{ vars.NSPECT_ID }}
