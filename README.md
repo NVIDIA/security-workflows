@@ -60,6 +60,34 @@ Performs static code analysis to surface security defects in first-party source 
 
 Flags terminology and content that conflicts with NVIDIA brand, legal, or inclusivity guidance.
 
+The pre-commit surface is `guardwords-scan-code-scanning`, a thin wrapper around NVIDIA's internal code-scanning service, which runs the GuardWords and secret scanners on the staged diff. The service is reachable only from the NVIDIA network and its client is distributed only to NVIDIA employees, so installing the hook downloads nothing, and each run decides what to do:
+
+| Condition | Result |
+|---|---|
+| Client not installed, or no endpoint configured (every external contributor) | Skipped with a notice |
+| Service unreachable (off the NVIDIA network or VPN), timed out, or failed | Skipped with a notice |
+| Informational findings only | Printed; the commit proceeds |
+| Blocking findings | Printed; the commit is blocked |
+
+`--on-unavailable=fail` turns every skip into a failure; use it only in repositories whose contributors are all on the NVIDIA network. There is no GuardWords CI workflow yet, so a skipped commit is not re-scanned before merge.
+
+```yaml
+- repo: https://github.com/NVIDIA/security-workflows
+  rev: <release tag>
+  hooks:
+    - id: guardwords-scan-code-scanning
+```
+
+NVIDIA employees enable the scan once per machine: put the code-scanning client on `PATH` as described on ProdSec's internal *Code Scanning – Commands and Usage* page, then set the endpoint listed there:
+
+```bash
+git config --global code-scanning.endpoint <HOST>:<PORT>
+# Only if your Git client does not inherit your shell PATH, as some GUI clients do not:
+git config --global code-scanning.client <PATH-TO-CLIENT>
+```
+
+The endpoint is not built into the hook, so this public repository names no internal host. A private repository can set it for every contributor with `args: [--endpoint=<HOST>:<PORT>]` instead.
+
 ## Example
 
 The expected consumption pattern for each surface is shown below. See [Pin policy per surface](#pin-policy-per-surface) for the recommended pin in each context (40-character commit SHA for workflows, release tag for pre-commit hooks).
@@ -101,7 +129,7 @@ The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md).
 
 ### Consumers (downstream NVIDIA repositories)
 
-Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`. `secret-scan-trufflehog` uses `language: python` and installs its pinned, SHA-256-verified TruffleHog release in pre-commit's isolated environment; consumers need no system scanner or shell installer. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
+Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`. `secret-scan-trufflehog` uses `language: python` and installs its pinned, SHA-256-verified TruffleHog release in pre-commit's isolated environment; consumers need no system scanner or shell installer. `guardwords-scan-code-scanning` installs only a standard-library Python wrapper and uses NVIDIA's internal code-scanning client where one is available — see [GuardWords scanning](#guardwords-scanning). The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
 
 Per-surface onboarding instructions — runner labels, trigger model, hook arguments, required developer-side tooling, security trade-offs — are documented inline: each workflow file's `workflow_call` definition and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
 

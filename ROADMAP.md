@@ -19,7 +19,7 @@
 | Vulnerability scanning | Planned | Out of scope (>10s DX budget) | CI workflow only |
 | Malware scanning | Planned | Out of scope (off-runner verdict service) | CI workflow only |
 | Static Application Security Testing (SAST) | Design — [`.github/workflows/sast-scan-codeql.yml`](.github/workflows/sast-scan-codeql.yml) (CodeQL candidate; **selection pending ProdSec**) | Out of scope (>10s DX budget) | CI workflow only. Customization-tier lever; fleet baseline is GitHub Default setup via org Security Configurations. Candidates: CodeQL/SonarQube/Coverity. |
-| GuardWords scanning | Planned | Planned | — |
+| GuardWords scanning | Planned | Design — `guardwords-scan-code-scanning` in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) | The hook wraps NVIDIA's internal code-scanning service and skips wherever the service is unavailable (external contributors, off-network). |
 
 ## Cross-cutting work
 

@@ -4,6 +4,12 @@ All notable changes to the workflows in this repository will be documented in th
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See [`README.md`](README.md#versioning) for the SHA-pinning contract that consumers are expected to follow.
 
+## [Unreleased]
+
+### Added
+
+- GuardWords (pre-commit) — `guardwords-scan-code-scanning` sends the staged diff to NVIDIA's internal code-scanning service (GuardWords and secret scanners) and blocks the commit on blocking findings; informational findings are printed without blocking. The hook installs a standard-library Python wrapper and nothing else, so `pre-commit install` works without NVIDIA network access. It skips with a notice when the client is not installed, no endpoint is configured, or the service is unreachable, times out, or fails; `--on-unavailable=fail` makes those cases fail instead. See [GuardWords scanning](README.md#guardwords-scanning).
+
 ## [0.4.0] - 2026-08-19
 
 Additive release. Callers passing `languages: '["actions","python"]'` need no change; the declared `permissions:` are unchanged, and the `analyze` job keeps the name `CodeQL (<language>)` so required status checks continue to match.

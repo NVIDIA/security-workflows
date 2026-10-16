@@ -9,7 +9,7 @@ Guidelines for agents (and humans) working in the NVIDIA Security Workflows repo
 This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. It exposes **two surfaces**:
 
 - **Reusable GitHub Actions workflows** under `.github/workflows/` — job-level server-side enforcement via [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows). Each workflow declares its own `permissions:` block and runs in an isolated job. This is the CI enforcement surface for security gates per guardrail #4 (least-privilege).
-- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and downloads the pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment; consumers need no system scanner or shell installer.
+- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and downloads the pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment; consumers need no system scanner or shell installer. `guardwords-scan-code-scanning` is a standard-library Python wrapper around NVIDIA's internal code-scanning client; it skips wherever the client or service is unavailable, so the same configuration works for external contributors.
 
 Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
 
@@ -53,7 +53,7 @@ Changes that fall outside these guardrails require ProdSec acknowledgment per [`
 
 ## Validating Changes
 
-This repository contains no application code; validation is YAML- and Actions-focused.
+This repository contains no application code beyond thin pre-commit hook wrappers; validation is YAML- and Actions-focused.
 
 ```bash
 # Syntactic YAML check across all tracked YAML files
@@ -81,7 +81,7 @@ coverage for a hook limited to another stage.
 
 ## Out of Scope
 
-- Application source code or libraries — this is a workflow-only repository, apart from the minimal packaging metadata needed for pre-commit hook installation.
+- Application source code or libraries — this is a workflow-only repository, apart from the minimal packaging metadata and thin wrappers needed for pre-commit hooks.
 - Per-repository configuration for downstream consumers — lives in each consumer repo, not here.
 
 ---

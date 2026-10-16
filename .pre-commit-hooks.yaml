@@ -17,3 +17,25 @@
   pass_filenames: true
   require_serial: true
   stages: [pre-commit, pre-push]
+
+- id: guardwords-scan-code-scanning
+  name: check for guardwords (NVIDIA code-scanning)
+  description: >-
+    Sends the staged diff to NVIDIA's internal code-scanning service, which runs
+    the GuardWords and secret scanners, and blocks the commit on blocking
+    findings. The service is reachable only from the NVIDIA network and its
+    client is distributed only to NVIDIA employees, so installation downloads
+    nothing. When the client, its endpoint, or the service is unavailable the
+    hook skips with a notice, so external contributors are never blocked.
+  # Arguments: --endpoint=HOST[:PORT] (used when git config code-scanning.endpoint is unset),
+  #   --timeout=SECONDS (default 8), --on-unavailable=skip|fail (default skip).
+  # Use --on-unavailable=fail only where every contributor is on the NVIDIA network: it fails every commit the service cannot scan.
+  entry: guardwords-scan-code-scanning
+  language: python
+  additional_dependencies: [./hooks/guardwords]
+  # The client diffs the index against HEAD itself; it accepts no file list.
+  pass_filenames: false
+  require_serial: true
+  # Informational findings and skip notices are visible only when output is shown.
+  verbose: true
+  stages: [pre-commit]
