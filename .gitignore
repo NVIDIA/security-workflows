@@ -19,6 +19,11 @@ Thumbs.db
 # Pre-commit local cache
 .pre-commit-cache/
 
+# Disposable fixture the vulnerability-scan self-test writes into the workspace at
+# run time. It pins a dependency with published advisories on purpose and must never
+# be committed — that would put a deliberate CVE in this repository's dependency graph.
+/.pulse-oss-selftest/
+
 # TruffleHog hook-package build artifacts. The executable is downloaded only
 # into a pre-commit environment and must never be committed.
 /hooks/trufflehog/build/

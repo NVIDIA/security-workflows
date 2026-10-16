@@ -48,6 +48,8 @@ Verifies that source files carry approved license headers and that direct and tr
 
 Identifies known vulnerabilities (CVEs) and risky packages in third-party dependencies pulled in by the repository, across supported language ecosystems. Sometimes referred to as Software Composition Analysis (SCA).
 
+The CI surface is `vuln-scan-pulse-oss`, which runs NVIDIA's Pulse OSS scanner on `nv-gha-runners` and reports to the nSpect vulnerability backend, so findings become records of account rather than only CI output. The scanner image reference is fixed to one `nvcr.io` repository path inside the workflow and reaches nSpect over a loopback tunnel; GitHub OIDC is the only identity presented. It is a post-merge and scheduled gate today — pull-request coverage depends on a platform-side change described in the [workflow catalogue](.github/workflows/README.md#vulnerability-scan-sca--vuln-scan-pulse-ossyml), which also covers the interface and the `report-only` → `fail-on-vulnerability` rollout.
+
 ### Malware scanning
 
 Inspects committed and incoming files for malicious binaries, packers, droppers, and known indicators of compromise. Targeted at repositories that ingest binaries, models, or other non-source artifacts.
