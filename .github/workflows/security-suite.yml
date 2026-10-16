@@ -34,7 +34,8 @@ on:
       enable-vuln-scan:
         description: >-
           Run the Pulse OSS vulnerability scan (vuln-scan-pulse-oss.yml). Off by default.
-          Requires self-hosted nv-gha-runners and an nSpect registration — set nspect-id when you do.
+          Requires self-hosted nv-gha-runners. Set nspect-id to record findings against an
+          nSpect registration; without it the scan runs unregistered and rapid-only.
         type: boolean
         required: false
         default: false
@@ -167,7 +168,6 @@ jobs:
     name: Suite preflight
     if: >-
       ${{ (!inputs.enable-secret-scan && !inputs.enable-vuln-scan && !inputs.enable-sast-scan)
-          || (inputs.enable-vuln-scan && inputs.nspect-id == '')
           || (inputs.enable-sast-scan && inputs.sast-languages == '') }}
     runs-on: ${{ inputs.suite-runs-on }}
     steps:
@@ -176,17 +176,12 @@ jobs:
           ENABLE_SECRET_SCAN: ${{ inputs.enable-secret-scan }}
           ENABLE_VULN_SCAN: ${{ inputs.enable-vuln-scan }}
           ENABLE_SAST_SCAN: ${{ inputs.enable-sast-scan }}
-          NSPECT_ID: ${{ inputs.nspect-id }}
           SAST_LANGUAGES: ${{ inputs.sast-languages }}
         run: |
           set -euo pipefail
           # Report every missing companion input before exiting, so a caller enabling two
           # scans at once does not have to fix one, re-run, and discover the next.
           failures=0
-          if [ "$ENABLE_VULN_SCAN" = "true" ] && [ -z "$NSPECT_ID" ]; then
-            echo "::error::enable-vuln-scan is true but nspect-id is empty. Pass the repository's nSpect ID from the vars.NSPECT_ID repository variable."
-            failures=$((failures + 1))
-          fi
           if [ "$ENABLE_SAST_SCAN" = "true" ] && [ -z "$SAST_LANGUAGES" ]; then
             echo "::error::enable-sast-scan is true but sast-languages is empty. Pass a JSON array of CodeQL languages, for example: sast-languages: '[\"actions\"]'."
             failures=$((failures + 1))
@@ -213,7 +208,7 @@ jobs:
 
   vuln-scan:
     name: Vulnerability scan (Pulse OSS)
-    if: ${{ inputs.enable-vuln-scan && inputs.nspect-id != '' }}
+    if: ${{ inputs.enable-vuln-scan }}
     permissions:
       contents: read
       id-token: write

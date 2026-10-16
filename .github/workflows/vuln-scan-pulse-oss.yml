@@ -21,10 +21,15 @@ on:
         default: linux-amd64-cpu4
       nspect_id:
         description: >-
-          nSpect ID for the calling repository (NSPECT-xxxx-xxxx).
-          Supply it from the NSPECT_ID repository or repository variable.
+          nSpect ID for the calling repository (NSPECT-xxxx-xxxx), normally from the NSPECT_ID
+          repository or organization variable.
+          Leave it empty to run unregistered: the scan reports findings in the job without
+          recording them against a registration, which is the only lane available to a
+          repository that has no nSpect registration. Unregistered runs are rapid-only and
+          cannot write inventory, because both need a registration to write against.
         type: string
-        required: true
+        required: false
+        default: ''
       registered_branch:
         description: Default or release branch registered in nSpect.
         type: string
@@ -186,8 +191,10 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$INPUT_NSPECT_ID" =~ ^NSPECT-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$ ]]; then
-            echo "::error::nspect_id must be a valid nSpect ID (NSPECT-xxxx-xxxx)."
+          # Empty selects the unregistered lane below; anything present must be well formed.
+          if [[ -n "$INPUT_NSPECT_ID" ]] \
+            && [[ ! "$INPUT_NSPECT_ID" =~ ^NSPECT-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$ ]]; then
+            echo "::error::nspect_id must be a valid nSpect ID (NSPECT-xxxx-xxxx), or empty to run unregistered."
             exit 1
           fi
           if [[ ! "$INPUT_REGISTERED_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$ ]] \
@@ -210,11 +217,19 @@ jobs:
 
           resolved_mode="$INPUT_SCAN_MODE"
           if [[ "$resolved_mode" == auto ]]; then
-            if [[ "$GITHUB_REF" == "refs/heads/$INPUT_REGISTERED_BRANCH" ]]; then
+            # Without a registration there is nothing for a persistent scan to own, so auto
+            # resolves to rapid on every ref rather than to persistent on the registered one.
+            if [[ -n "$INPUT_NSPECT_ID" && "$GITHUB_REF" == "refs/heads/$INPUT_REGISTERED_BRANCH" ]]; then
               resolved_mode=persistent
             else
               resolved_mode=rapid
             fi
+          fi
+          # The CLI rejects these combinations itself with a usage error; failing here names
+          # the input that is wrong instead of surfacing an exit code from inside the container.
+          if [[ -z "$INPUT_NSPECT_ID" && "$resolved_mode" != rapid ]]; then
+            echo "::error::scan_mode ${INPUT_SCAN_MODE} needs an nspect_id. An unregistered scan is rapid-only."
+            exit 1
           fi
           # A persistent scan owns a stable project/version, so only the registered ref may run one.
           if [[ "$resolved_mode" == persistent && "$GITHUB_REF" != "refs/heads/$INPUT_REGISTERED_BRANCH" ]]; then
@@ -454,18 +469,27 @@ jobs:
           # newer builds reject the same registration unless the environment is set as well.
           # Passing both keeps either generation working. Matches how the reference harness
           # in nSpect-github-first-poc-test-1 invokes the CLI.
-          export PULSE_NSPECT_ID="$INPUT_NSPECT_ID"
-          export PULSE_REPO_URL="ssh://git@github.com/${GITHUB_REPOSITORY}.git"
-          export PULSE_REPO_BRANCH="$INPUT_REGISTERED_BRANCH"
           export PULSE_CHARON_URL="http://127.0.0.1:${CHARON_LOCAL_PORT}"
 
           command=(
             pulse --no-echo --no-color --timeout "$INPUT_TIMEOUT"
             --charon-url "$PULSE_CHARON_URL"
-            --nspect-id "$PULSE_NSPECT_ID"
-            --repo-url "$PULSE_REPO_URL"
-            --repo-branch "$PULSE_REPO_BRANCH"
           )
+          if [[ -n "$INPUT_NSPECT_ID" ]]; then
+            export PULSE_NSPECT_ID="$INPUT_NSPECT_ID"
+            export PULSE_REPO_URL="ssh://git@github.com/${GITHUB_REPOSITORY}.git"
+            export PULSE_REPO_BRANCH="$INPUT_REGISTERED_BRANCH"
+            command+=(
+              --nspect-id "$PULSE_NSPECT_ID"
+              --repo-url "$PULSE_REPO_URL"
+              --repo-branch "$PULSE_REPO_BRANCH"
+            )
+          else
+            # Mutually exclusive with the registration flags: the CLI exits 2 if --nspect-id,
+            # --repo-url, --repo-branch, --sbom-name or --override appears alongside it. The
+            # PULSE_* variables stay unset, and docker omits an --env whose value is unset.
+            command+=(--no-nspect)
+          fi
           if [[ "$RESOLVED_MODE" == persistent ]]; then
             command+=(
               scan --project "$PROJECT_NAME" --project-version "$PROJECT_VERSION"

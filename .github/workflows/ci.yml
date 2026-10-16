@@ -626,6 +626,17 @@ jobs:
 
           reset_case; NSPECT_ID=NSPECT-BAD
           expect_rejected "a malformed nSpect id is rejected" "must be a valid nSpect ID"
+
+          # Unregistered lane: an empty nspect_id selects --no-nspect, which the CLI allows
+          # only for a rapid scan with no inventory write-back.
+          reset_case; NSPECT_ID=; SCAN_MODE=rapid
+          expect_ok       "an empty nSpect id is accepted for a rapid scan" resolved_mode rapid
+          reset_case; NSPECT_ID=; SCAN_MODE=auto; REF=refs/heads/main
+          expect_ok       "auto stays rapid without a registration, even on the registered ref" resolved_mode rapid
+          reset_case; NSPECT_ID=; SCAN_MODE=persistent
+          expect_rejected "a persistent scan without a registration is rejected" "needs an nspect_id"
+          reset_case; NSPECT_ID=; SCAN_MODE=rapid; WRITEBACK=true
+          expect_rejected "write-back without a registration is rejected" "inventory_writeback"
           reset_case; REGISTERED_BRANCH=../../etc
           expect_rejected "a traversal in registered_branch is rejected" "registered_branch is invalid"
           reset_case; SCAN_MODE=turbo
@@ -970,11 +981,11 @@ jobs:
           set -uo pipefail
           failures=0
 
-          # run <secret> <vuln> <sast> <nspect-id> <languages> -> sets $code
+          # run <secret> <vuln> <sast> <languages> -> sets $code
           run_preflight() {
             code=0
             ENABLE_SECRET_SCAN="$1" ENABLE_VULN_SCAN="$2" ENABLE_SAST_SCAN="$3" \
-              NSPECT_ID="$4" SAST_LANGUAGES="$5" \
+              SAST_LANGUAGES="$4" \
               bash "$PREFLIGHT" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
           }
 
@@ -1003,7 +1014,7 @@ jobs:
           }
 
           # A suite that enables nothing warns and stays green — it is useless, not broken.
-          run_preflight false false false '' ''
+          run_preflight false false false ''
           if [ "$code" -ne 0 ]; then
             echo "::error::an empty suite selection must warn, not fail"; failures=$((failures+1))
           elif ! grep -q '::warning::' "$RUNNER_TEMP/log.txt"; then
@@ -1012,27 +1023,12 @@ jobs:
             echo "✓ an empty suite selection warns and stays green"
           fi
 
-          expect_pass "a complete vuln selection is accepted" false true false NSPECT-ABCD-1234 ''
-          expect_pass "a complete SAST selection is accepted" false false true '' '["actions"]'
-          expect_pass "secret-only needs no companion input"  true  false false '' ''
+          expect_pass "enable-vuln-scan needs no companion input" false true false ''
+          expect_pass "a complete SAST selection is accepted" false false true '["actions"]'
+          expect_pass "secret-only needs no companion input"  true  false false ''
 
-          expect_fail "enable-vuln-scan without an nSpect id is refused" \
-            nspect-id             false true  false '' ''
           expect_fail "enable-sast-scan without languages is refused" \
-            sast-languages        false false true  '' ''
-
-          # Both must be reported in one run: fixing one and re-running to find the next is
-          # the failure mode this ordering exists to prevent.
-          run_preflight false true true '' ''
-          if [ "$code" -eq 0 ]; then
-            echo "::error::two missing companion inputs must fail"; failures=$((failures+1))
-          elif ! grep -qF nspect-id "$RUNNER_TEMP/log.txt" \
-             || ! grep -qF sast-languages "$RUNNER_TEMP/log.txt"; then
-            echo "::error::both missing companion inputs must be named in one run"
-            cat "$RUNNER_TEMP/log.txt"; failures=$((failures+1))
-          else
-            echo "✓ two missing companion inputs are both named in one run"
-          fi
+            sast-languages        false false true  ''
 
           if [ "$failures" -ne 0 ]; then
             echo "::error::${failures} preflight case(s) failed"
@@ -1069,7 +1065,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/vuln-scan-pulse-oss.yml
     with:
-      nspect_id: ${{ vars.NSPECT_ID }}
       scan_mode: rapid
       failure_policy: report-only
 
@@ -1083,7 +1078,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/vuln-scan-pulse-oss.yml
     with:
-      nspect_id: ${{ vars.NSPECT_ID }}
       scan_mode: rapid
       failure_policy: report-only
       ci_test_setup: true
@@ -1132,6 +1126,5 @@ jobs:
     uses: ./.github/workflows/security-suite.yml
     with:
       enable-vuln-scan: true
-      nspect-id: ${{ vars.NSPECT_ID }}
       vuln-scan-mode: rapid
       vuln-failure-policy: report-only
