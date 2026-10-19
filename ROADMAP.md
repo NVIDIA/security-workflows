@@ -16,7 +16,7 @@
 |---|---|---|---|
 | Secret scanning | Pilot (v0.1.0) — [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) | Pilot (v0.1.0) — `secret-scan-trufflehog` published in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) | Pulse is the CI enforcement lane (runs the Pulse image on `nv-gha-runners`); OSS TruffleHog is the local pre-commit advisory lane. |
 | License scanning | Planned | Planned | — |
-| Vulnerability scanning | Planned | Out of scope (>10s DX budget) | CI workflow only |
+| Vulnerability scanning | Design — [`.github/workflows/vuln-scan-pulse-oss.yml`](.github/workflows/vuln-scan-pulse-oss.yml) (Pulse OSS → nSpect) | Out of scope (>10s DX budget) | CI workflow only. A repository needs a Charon tenant granting the Pulse backends, and each gating ref on its allowlist. SARIF publication is a follow-up. |
 | Malware scanning | Planned | Out of scope (off-runner verdict service) | CI workflow only |
 | Static Application Security Testing (SAST) | Design — [`.github/workflows/sast-scan-codeql.yml`](.github/workflows/sast-scan-codeql.yml) (CodeQL candidate; **selection pending ProdSec**) | Out of scope (>10s DX budget) | CI workflow only. Customization-tier lever; fleet baseline is GitHub Default setup via org Security Configurations. Candidates: CodeQL/SonarQube/Coverity. |
 | GuardWords scanning | Planned | Planned | — |
