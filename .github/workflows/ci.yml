@@ -463,7 +463,7 @@ jobs:
           set -euo pipefail
           pip install --quiet pyyaml
           python - <<'PY'
-          import os, pathlib, yaml
+          import os, pathlib, re, yaml
           workflow = yaml.safe_load(pathlib.Path(".github/workflows/vuln-scan-pulse-oss.yml").read_text())
           job = workflow["jobs"]["pulse-oss"]
           steps = {step["name"]: step for step in job["steps"]}
@@ -471,6 +471,7 @@ jobs:
           for filename, step_name in {
               "contract.sh": "Validate scan contract",
               "scan-path.sh": "Validate scan path",
+              "classify.sh": "Classify scan result",
               "report.sh": "Validate scan report",
               "enforce.sh": "Enforce scan result",
           }.items():
@@ -480,7 +481,7 @@ jobs:
           (temp / "job-env.sh").write_text(
               "ALLOWED_REGISTRY=%s\n" % job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"])
           PY
-          for f in contract.sh scan-path.sh report.sh enforce.sh job-env.sh; do
+          for f in contract.sh scan-path.sh classify.sh report.sh enforce.sh job-env.sh; do
             test -s "$RUNNER_TEMP/$f"
           done
 
@@ -504,7 +505,7 @@ jobs:
             IMAGE_REF="$GOOD_IMAGE"; CLIENT_VERSION=auto
             OIDC_URL=https://oidc.example.invalid/token; OIDC_TOKEN=placeholder-not-a-real-token
             VAULT_URL=https://vault.example.invalid
-            NSPECT_ID=NSPECT-ABCD-1234; REGISTERED_BRANCH=main
+            NSPECT_ID=NSPECT-ABCD-1234; REGISTERED_BRANCH=main; SBOM_NAME=
             SCAN_MODE=rapid; SCAN_PATH=.; FAILURE_POLICY=report-only
             WRITEBACK=false; TIMEOUT=1800
           }
@@ -523,7 +524,7 @@ jobs:
             NV_VAULT_URL="$VAULT_URL" NVCR_VAULT_ROLE=role NVCR_VAULT_JWT_PATH=jwt-path \
             NVCR_VAULT_NAMESPACE=namespace NVCR_VAULT_SECRET_PATH=secret/path \
             INPUT_NSPECT_ID="$NSPECT_ID" \
-            INPUT_REGISTERED_BRANCH="$REGISTERED_BRANCH" \
+            INPUT_REGISTERED_BRANCH="$REGISTERED_BRANCH" INPUT_SBOM_NAME="$SBOM_NAME" \
             INPUT_SCAN_MODE="$SCAN_MODE" INPUT_SCAN_PATH="$SCAN_PATH" \
             INPUT_FAILURE_POLICY="$FAILURE_POLICY" INPUT_WRITEBACK="$WRITEBACK" \
             INPUT_TIMEOUT="$TIMEOUT" \
@@ -575,8 +576,10 @@ jobs:
           expect_ok  "auto on the registered branch resolves to persistent" resolved_mode persistent
           reset_case; SCAN_MODE=auto; REF=refs/heads/topic
           expect_ok  "auto off the registered branch resolves to rapid" resolved_mode rapid
-          reset_case; SCAN_MODE=persistent; WRITEBACK=true
+          reset_case; SCAN_MODE=persistent; WRITEBACK=true; SBOM_NAME=ghf-oss-example
           expect_ok  "inventory write-back is accepted on a persistent scan" resolved_mode persistent
+          reset_case; SCAN_MODE=persistent; SBOM_NAME="Example Product SBOM 2.1"
+          expect_ok  "an SBOM name selects the registration of a persistent scan" resolved_mode persistent
           reset_case; CLIENT_VERSION=17.1.2
           expect_ok  "a pinned tunnel client version is accepted"
           reset_case; expect_ok "scan_path '.' slugs to root" artifact_slug root
@@ -636,7 +639,9 @@ jobs:
           reset_case; NSPECT_ID=; SCAN_MODE=persistent
           expect_rejected "a persistent scan without a registration is rejected" "needs an nspect_id"
           reset_case; NSPECT_ID=; SCAN_MODE=rapid; WRITEBACK=true
-          expect_rejected "write-back without a registration is rejected" "inventory_writeback"
+          expect_rejected "write-back without a registration is rejected" "available only for a persistent scan"
+          reset_case; NSPECT_ID=; SBOM_NAME=ghf-oss-example
+          expect_rejected "an SBOM name without a registration is rejected" "needs an nspect_id"
           reset_case; REGISTERED_BRANCH=../../etc
           expect_rejected "a traversal in registered_branch is rejected" "registered_branch is invalid"
           reset_case; SCAN_MODE=turbo
@@ -654,7 +659,30 @@ jobs:
           reset_case; SCAN_MODE=persistent; REF=refs/heads/topic
           expect_rejected "a persistent scan off the registered ref is rejected" "persistent scan requires"
           reset_case; SCAN_MODE=rapid; WRITEBACK=true
-          expect_rejected "write-back without a persistent scan is rejected" "inventory_writeback"
+          expect_rejected "write-back without a persistent scan is rejected" "available only for a persistent scan"
+          reset_case; SCAN_MODE=persistent; WRITEBACK=true
+          expect_rejected "write-back without an SBOM name is rejected" "inventory_writeback needs sbom_name"
+
+          # A pull-request mirror carries pull-request content, so it is RAPID-only.
+          MIRROR=refs/heads/pull-request/42
+          reset_case; REF="$MIRROR"; SCAN_MODE=auto
+          expect_ok       "auto on a pull-request mirror resolves to rapid" resolved_mode rapid
+          reset_case; REF="$MIRROR"; SBOM_NAME=ghf-oss-example
+          expect_ok       "a registered rapid scan runs on a pull-request mirror" resolved_mode rapid
+          reset_case; REF="$MIRROR"; SCAN_MODE=persistent
+          expect_rejected "a persistent scan on a pull-request mirror is rejected" "RAPID-only"
+          reset_case; REF="$MIRROR"; SCAN_MODE=rapid; WRITEBACK=true
+          expect_rejected "write-back on a pull-request mirror is rejected" "RAPID-only"
+          # Without this, auto would resolve to persistent on the mirror it names.
+          reset_case; REF="$MIRROR"; SCAN_MODE=auto; REGISTERED_BRANCH=pull-request/42
+          expect_rejected "a mirror named as registered_branch is rejected" "cannot be a copy-pr-bot"
+
+          reset_case; SBOM_NAME="-x"
+          expect_rejected "an SBOM name that reads as an option is rejected" "sbom_name must"
+          reset_case; SBOM_NAME="$(printf 'ghf-oss\nexample')"
+          expect_rejected "a control character in the SBOM name is rejected" "sbom_name must"
+          reset_case; SBOM_NAME="$(printf 'a%.0s' $(seq 256))"
+          expect_rejected "an SBOM name over 255 characters is rejected" "sbom_name must"
 
           if [ "$failures" -ne 0 ]; then
             echo "::error::${failures} contract case(s) failed"
@@ -757,6 +785,85 @@ jobs:
             exit 1
           fi
           echo "All scan_path cases passed."
+
+      - name: Assert log text never turns a failed scan into a pass
+        env:
+          CLASSIFY: ${{ runner.temp }}/classify.sh
+        run: |
+          set -uo pipefail
+          failures=0
+          work="$RUNNER_TEMP/classify"
+          rm -rf "$work"
+          mkdir -p "$work/out"
+
+          # run_classify <exit-code> <scanner output>
+          run_classify() {
+            printf '%s\n' "$2" > "$work/raw.log"
+            printf 'ERROR: sanitized scanner reason\n' > "$work/out/scanner-failure.log"
+            : > "$work/github-output"
+            code=0
+            SCANNER_STATUS="$1" PULSE_OSS_RAW_LOG="$work/raw.log" PULSE_OSS_OUTPUT_DIR="$work/out" \
+              GITHUB_OUTPUT="$work/github-output" \
+              bash "$CLASSIFY" > "$work/log.txt" 2>&1 || code=$?
+            effective="$(sed -n 's/^effective_status=//p' "$work/github-output")"
+            category="$(sed -n 's/^diagnostic_category=//p' "$work/github-output")"
+          }
+
+          # expect_classified <name> <exit-code> <scanner output> <effective-status> <category>
+          expect_classified() {
+            local name="$1" want_status="$4" want_category="$5"
+            run_classify "$2" "$3"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::${name}: the classifier itself failed, exit ${code}"
+              cat "$work/log.txt"; failures=$((failures+1)); return
+            fi
+            if [ "$effective" != "$want_status" ] || [ "$category" != "$want_category" ]; then
+              echo "::error::${name}: got status='${effective}' category='${category}', expected status='${want_status}' category='${want_category}'"
+              failures=$((failures+1)); return
+            fi
+            echo "✓ ${name} (${effective}, ${category})"
+          }
+
+          expect_classified "a clean scan stays clean" \
+            0 "Scan completed." 0 none
+          expect_classified "findings on a completed scan are a policy outcome" \
+            0 "FAILURE_POLICY_VIOLATION: 3 components violate policy" 0 vulnerability-policy
+          expect_classified "a policy violation accounts for Detect's status-code line" \
+            0 $'rapid scan is failed with status code 3\nFAILURE_POLICY_VIOLATION' 0 vulnerability-policy
+          expect_classified "a backend failure behind a zero exit is caught" \
+            0 "rapid scan is failed with status code 500" 70 downstream-scan-error
+
+          # Finding text followed by a request failure, exit 1: the scan failed and stays failed.
+          expect_classified "finding text never lowers a non-zero exit" \
+            1 $'FAILURE_POLICY_VIOLATION\nHTTP 503 Service Unavailable' 1 scanner-error
+          expect_classified "a findings summary never lowers a non-zero exit" \
+            1 "Scan job found 3 vulnerabilities" 1 scanner-error
+          expect_classified "a backend failure keeps its own exit code" \
+            2 "stateless scan is failed with status code 502" 2 downstream-scan-error
+          expect_classified "a named failure keeps its category under finding text" \
+            1 $'FAILURE_POLICY_VIOLATION\nCharon request failed: HTTP 403' 1 charon-gateway-error
+
+          # The status file keeps the scanner's own exit code beside the effective one.
+          run_classify 0 "rapid scan is failed with status code 500"
+          if python3 -c 'import json, sys; s = json.load(open(sys.argv[1])); sys.exit((s["scanner_exit_code"], s["effective_status"]) != (0, 70))' \
+              "$work/out/scanner-status.json"; then
+            echo "✓ scanner-status.json records the raw exit code apart from the effective status"
+          else
+            echo "::error::scanner-status.json does not keep the raw exit code apart from the effective status"
+            failures=$((failures+1))
+          fi
+          if grep -qF "::error::Scanner: ERROR: sanitized scanner reason" "$work/log.txt"; then
+            echo "✓ a failed scan puts the scanner's own reason in the log"
+          else
+            echo "::error::a failed scan did not surface the sanitized scanner error line"
+            failures=$((failures+1))
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} classification case(s) failed"
+            exit 1
+          fi
+          echo "All classification cases passed."
 
       - name: Assert the report validator fails closed on unsafe reports
         env:
@@ -901,15 +1008,15 @@ jobs:
           set -uo pipefail
           failures=0
 
-          # run <policy> <findings> <report-status> <scanner-exit> -> sets $code
+          # run <policy> <findings> <report-status> <effective-status> [category] [unfiltered] -> sets $code
           run_enforce() {
             code=0
-            FAILURE_POLICY="$1" FINDING_COUNT="$2" REPORT_STATUS="$3" SCANNER_EXIT="$4" \
-              DIAGNOSTIC_CATEGORY="${5:-none}" \
+            FAILURE_POLICY="$1" FINDING_COUNT="$2" REPORT_STATUS="$3" EFFECTIVE_STATUS="$4" \
+              DIAGNOSTIC_CATEGORY="${5:-none}" UNFILTERED_COUNT="${6:-}" \
               bash "$ENFORCE" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
           }
 
-          # expect <pass|fail> <name> <policy> <findings> <report-status> <scanner-exit> [category]
+          # expect <pass|fail> <name> <policy> <findings> <report-status> <effective-status> [category] [unfiltered]
           expect() {
             local want="$1" name="$2"; shift 2
             run_enforce "$@"
@@ -924,7 +1031,7 @@ jobs:
             echo "✓ ${name}"
           }
 
-          # assert_message <name> <substring> <policy> <findings> <report-status> <exit> [category]
+          # assert_message <name> <substring> <policy> <findings> <report-status> <status> [category] [unfiltered]
           # Several branches here fail closed, so an exit code alone does not prove the right
           # one fired — and which one fired is what the operator reads to diagnose the run.
           assert_message() {
@@ -959,8 +1066,27 @@ jobs:
           expect fail "an unsafe report blocks under fail-on-vulnerability" \
             fail-on-vulnerability 0 failure 0
 
-          # Findings are classified before the exit code, so a policy violation reports the
-          # findings rather than the transport failure the forced exit code would imply.
+          # Findings never rescue a failed scan, under either policy.
+          expect fail "a failed scan blocks under report-only even with findings" \
+            report-only 10 success 1 scanner-error
+          expect fail "a failed scan blocks under fail-on-vulnerability even with findings" \
+            fail-on-vulnerability 10 success 1 scanner-error
+
+          # A policy violation must be accounted for by the report, before or after exceptions.
+          expect fail "a policy violation with an empty report is not a pass" \
+            report-only 0 success 0 vulnerability-policy
+          expect pass "a policy violation whose findings were all excepted passes" \
+            report-only 0 success 0 vulnerability-policy 1
+          expect pass "a policy violation with findings warns under report-only" \
+            report-only 10 success 0 vulnerability-policy
+          expect fail "a policy violation with findings blocks under fail-on-vulnerability" \
+            fail-on-vulnerability 10 success 0 vulnerability-policy
+
+          # Several branches fail closed, so the message shows which one fired.
+          assert_message "a failed scan is reported as the cause, not its findings" \
+            "(scanner-error)" fail-on-vulnerability 10 success 1 scanner-error
+          assert_message "an unexplained policy violation says so" \
+            "holds no findings to account for it" report-only 0 success 0 vulnerability-policy
           assert_message "a blocked scan names the policy it violated" \
             "violate failure_policy=fail-on-vulnerability" fail-on-vulnerability 10 success 0
           assert_message "report-only findings surface as a warning" \
@@ -1079,11 +1205,11 @@ jobs:
   # Ungated on purpose: these run on every push, so a regression in the scan surfaces here
   # rather than behind a variable somebody has to remember to flip. That makes the scan's
   # prerequisites hard requirements for this repository, not optional extras —
-  # VULN_SCAN_PULSE_OSS_IMAGE + _DIGEST and NSPECT_ID must be visible, and the triggering ref
-  # must appear in this repository's Charon tenant allowed_refs. Charon authorizes per ref,
-  # and a ref it does not list is refused as an nSpect HTTP 403, so CI covers only the refs
-  # the tenant lists: today that means pushes to main, and pull requests once the tenant also
-  # lists refs/heads/pull-request/*.
+  # VULN_SCAN_PULSE_OSS_IMAGE must be visible and hold the repository of the digest the
+  # workflow pins, and the triggering ref must appear in this repository's Charon tenant
+  # allowed_refs. Charon authorizes per ref, and a ref it does not list is refused as an
+  # nSpect HTTP 403, so CI covers only the refs the tenant lists: pushes to main and the
+  # copy-pr-bot refs/heads/pull-request/* mirrors.
   #
   # scan_mode is pinned to rapid rather than left on auto: auto resolves to persistent on
   # main, and a self-test must not create or update project state in the vulnerability

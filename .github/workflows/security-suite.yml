@@ -59,7 +59,7 @@ on:
           vars.NSPECT_ID repository variable. Carries no scan prefix because an nSpect ID
           belongs to the repository rather than to one scan — every scan here that reports to
           nSpect reads this one input.
-          Required when enable-vuln-scan is true; ignored otherwise.
+          Optional for enable-vuln-scan: left empty, the vulnerability scan runs unregistered and rapid-only.
         type: string
         required: false
         default: ''
@@ -76,10 +76,18 @@ on:
         required: false
         default: unverified
       vuln-registered-branch:
-        description: Default or release branch registered in nSpect.
+        description: Default or release branch registered in nSpect. Never a pull-request/* mirror.
         type: string
         required: false
         default: main
+      vuln-sbom-name:
+        description: >-
+          SBOM name of the nSpect registration to scan against, for a registered branch with more
+          than one SBOM entry. Needs nspect-id; required with vuln-inventory-writeback.
+          See vuln-scan-pulse-oss.yml (sbom_name).
+        type: string
+        required: false
+        default: ''
       vuln-runs-on:
         description: Runner label for the Pulse OSS vulnerability scan (an nv-gha-runners label).
         type: string
@@ -112,7 +120,7 @@ on:
         required: false
         default: report-only
       vuln-inventory-writeback:
-        description: Publish results to nSpect inventory (persistent scans only).
+        description: Publish results to nSpect inventory (persistent scans only). Requires vuln-sbom-name.
         type: boolean
         required: false
         default: false
@@ -217,6 +225,7 @@ jobs:
       runs-on: ${{ inputs.vuln-runs-on }}
       nspect_id: ${{ inputs.nspect-id }}
       registered_branch: ${{ inputs.vuln-registered-branch }}
+      sbom_name: ${{ inputs.vuln-sbom-name }}
       scan_path: ${{ inputs.vuln-scan-path }}
       scan_mode: ${{ inputs.vuln-scan-mode }}
       build: ${{ inputs.vuln-build }}

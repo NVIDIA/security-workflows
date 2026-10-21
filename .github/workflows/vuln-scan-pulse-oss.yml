@@ -29,10 +29,19 @@ on:
         required: false
         default: ''
       registered_branch:
-        description: Default or release branch registered in nSpect.
+        description: Default or release branch registered in nSpect. Never a pull-request/* mirror.
         type: string
         required: false
         default: main
+      sbom_name:
+        description: >-
+          SBOM name of the nSpect registration to scan against, passed to the CLI as --sbom-name.
+          The repository, registered_branch and SBOM name together select one registration, so set
+          this when the registered branch carries more than one SBOM entry. Needs nspect_id, and is
+          required with inventory_writeback so that a write lands on the registration named here.
+        type: string
+        required: false
+        default: ''
       scan_path:
         description: Repository-relative directory to scan.
         type: string
@@ -42,7 +51,8 @@ on:
         description: >-
           Scan family to run. Allowed:
           - auto (default) — persistent on the registered branch, rapid everywhere else.
-          - persistent — creates or updates the project/version in the backend.
+          - persistent — creates or updates the project/version in the backend. Only on the
+            registered branch; refused on pull-request/* mirrors, which are rapid-only.
           - rapid — reports findings without creating persistent state.
         type: string
         required: false
@@ -56,14 +66,16 @@ on:
       failure_policy:
         description: >-
           Pipeline failure behavior on findings. The scan always produces the full report;
-          this input only decides whether findings fail the job. Allowed:
+          this input only decides whether findings fail the job, and is applied to the validated
+          report — the CLI always runs with --no-fail, so its exit code reports only whether the
+          scan itself succeeded. Allowed:
           - report-only (default) — findings warn; scanner and transport errors still fail.
           - fail-on-vulnerability — any reported finding fails the job.
         type: string
         required: false
         default: report-only
       inventory_writeback:
-        description: Publish results to nSpect inventory (persistent scans only).
+        description: Publish results to nSpect inventory (persistent scans only). Requires sbom_name.
         type: boolean
         required: false
         default: false
@@ -129,6 +141,7 @@ jobs:
         env:
           INPUT_NSPECT_ID: ${{ inputs.nspect_id }}
           INPUT_REGISTERED_BRANCH: ${{ inputs.registered_branch }}
+          INPUT_SBOM_NAME: ${{ inputs.sbom_name }}
           INPUT_SCAN_MODE: ${{ inputs.scan_mode }}
           INPUT_SCAN_PATH: ${{ inputs.scan_path }}
           INPUT_FAILURE_POLICY: ${{ inputs.failure_policy }}
@@ -200,6 +213,12 @@ jobs:
             echo "::error::registered_branch is invalid."
             exit 1
           fi
+          # A mirror is never a registration, and naming one would let auto resolve to
+          # persistent on the mirror itself.
+          if [[ "$INPUT_REGISTERED_BRANCH" == pull-request/* ]]; then
+            echo "::error::registered_branch cannot be a copy-pr-bot pull-request/* mirror."
+            exit 1
+          fi
           case "$INPUT_SCAN_MODE" in auto|persistent|rapid) ;;
             *) echo "::error::scan_mode must be auto, persistent, or rapid."; exit 1 ;;
           esac
@@ -228,6 +247,13 @@ jobs:
             echo "::error::scan_mode ${INPUT_SCAN_MODE} needs an nspect_id. An unregistered scan is rapid-only."
             exit 1
           fi
+          # copy-pr-bot mirrors each pull request to refs/heads/pull-request/<n>, so that ref
+          # carries pull-request content and may run only a rapid scan, which records nothing.
+          if [[ "$GITHUB_REF" == refs/heads/pull-request/* ]] \
+            && [[ "$resolved_mode" != rapid || "$INPUT_WRITEBACK" == true ]]; then
+            echo "::error::Pull request mirrors (refs/heads/pull-request/*) are RAPID-only. Use scan_mode auto or rapid, with inventory_writeback false."
+            exit 1
+          fi
           # A persistent scan owns a stable project/version, so only the registered ref may run one.
           if [[ "$resolved_mode" == persistent && "$GITHUB_REF" != "refs/heads/$INPUT_REGISTERED_BRANCH" ]]; then
             echo "::error::A persistent scan requires the checked-out ref to be refs/heads/${INPUT_REGISTERED_BRANCH}."
@@ -235,6 +261,22 @@ jobs:
           fi
           if [[ "$INPUT_WRITEBACK" == true && "$resolved_mode" != persistent ]]; then
             echo "::error::inventory_writeback is available only for a persistent scan."
+            exit 1
+          fi
+          if [[ -n "$INPUT_SBOM_NAME" ]]; then
+            if [[ -z "$INPUT_NSPECT_ID" ]]; then
+              echo "::error::sbom_name selects an nSpect registration, so it needs an nspect_id."
+              exit 1
+            fi
+            # A leading '-' would be read as an option rather than as the value of --sbom-name.
+            if [[ ! "$INPUT_SBOM_NAME" =~ ^[A-Za-z0-9][^[:cntrl:]]{0,254}$ ]]; then
+              echo "::error::sbom_name must start with a letter or digit, hold no control characters, and be at most 255 characters."
+              exit 1
+            fi
+          fi
+          # A write must land on a named registration, not on whichever the backend selects.
+          if [[ "$INPUT_WRITEBACK" == true && -z "$INPUT_SBOM_NAME" ]]; then
+            echo "::error::inventory_writeback needs sbom_name, so the write lands on the registration named there."
             exit 1
           fi
 
@@ -435,8 +477,8 @@ jobs:
           CONTAINER_SCAN_PATH: ${{ steps.source.outputs.container_path }}
           INPUT_NSPECT_ID: ${{ inputs.nspect_id }}
           INPUT_REGISTERED_BRANCH: ${{ inputs.registered_branch }}
+          INPUT_SBOM_NAME: ${{ inputs.sbom_name }}
           INPUT_BUILD: ${{ inputs.build }}
-          INPUT_FAILURE_POLICY: ${{ inputs.failure_policy }}
           INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
         run: |
@@ -466,10 +508,9 @@ jobs:
             printf 'PULSE_OSS_STATUS_DIR=%s\n' "$host_status_dir"
           } >> "$GITHUB_ENV"
 
-          policy_flag=--no-fail
-          if [[ "$INPUT_FAILURE_POLICY" == fail-on-vulnerability ]]; then
-            policy_flag=--fail
-          fi
+          # Findings never set the exit code: the CLI always runs --no-fail, and the enforce step
+          # applies failure_policy to the validated report. Under --fail the CLI exits 1 for
+          # findings and for a failed scan alike, leaving only log text to tell them apart.
 
           # The same registration identity is supplied twice, as flags and as PULSE_* in the
           # container environment, because the two scanner generations do not agree on which
@@ -492,6 +533,9 @@ jobs:
               --repo-url "$PULSE_REPO_URL"
               --repo-branch "$PULSE_REPO_BRANCH"
             )
+            if [[ -n "$INPUT_SBOM_NAME" ]]; then
+              command+=(--sbom-name "$INPUT_SBOM_NAME")
+            fi
           else
             # Mutually exclusive with the registration flags: the CLI exits 2 if --nspect-id,
             # --repo-url, --repo-branch, --sbom-name or --override appears alongside it. The
@@ -501,13 +545,13 @@ jobs:
           if [[ "$RESOLVED_MODE" == persistent ]]; then
             command+=(
               scan --project "$PROJECT_NAME" --project-version "$PROJECT_VERSION"
-              "$policy_flag" --vulnerability-report "$report_name"
+              --no-fail --vulnerability-report "$report_name"
             )
             if [[ "$INPUT_WRITEBACK" == true ]]; then
               command+=(--override)
             fi
           else
-            command+=(rapidscan "$policy_flag" --vulnerability-report "$report_name")
+            command+=(rapidscan --no-fail --vulnerability-report "$report_name")
           fi
           if [[ "$INPUT_BUILD" == true ]]; then
             command+=(--build)
@@ -548,71 +592,11 @@ jobs:
           docker cp "$container_name:/tmp/$report_name" \
             "$output_dir/$report_name" >/dev/null 2>&1 || true
 
-          # Classify before anything keys off the result. This CLI has returned zero after a
-          # backend failure, so the effective status is what counts, and gating the
-          # diagnostics on the process exit code would suppress them for exactly the case
-          # the markers below exist to catch.
-          SCANNER_STATUS="$scanner_status" RAW_LOG="$raw_log" OUTPUT_DIR="$output_dir" \
-            python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          raw = Path(os.environ["RAW_LOG"]).read_text(
-              encoding="utf-8", errors="replace").lower()
-          status = int(os.environ["SCANNER_STATUS"])
-          # Detect exits 3 (FAILURE_POLICY_VIOLATION) and the CLI then logs "scan is failed
-          # with status code" for a scan that completed and found something. Findings are an
-          # outcome, not a transport failure, so they must be read from the report and left
-          # to failure_policy — checked first, because the wording collides with a real
-          # backend error.
-          policy_markers = (
-              "failure_policy_violation",
-              "scan job found",
-          )
-          backend_markers = (
-              "rapid scan is failed with status code",
-              "stateless scan is failed with status code",
-          )
-          if any(marker in raw for marker in policy_markers):
-              category = "vulnerability-policy"
-              status = 0
-          elif any(marker in raw for marker in backend_markers):
-              category = "downstream-scan-error"
-              if status == 0:
-                  status = 70
-          else:
-              category = "scanner-error" if status else "none"
-              for marker, candidate in (
-                  ("github oidc token request failed", "github-identity-error"),
-                  ("unable to obtain github oidc", "github-identity-error"),
-                  ("charon request failed", "charon-gateway-error"),
-                  ("registration verification failed", "registration-or-service-error"),
-                  ("nspect verification failed", "registration-or-service-error"),
-                  ("invalid nspect id", "registration-or-service-error"),
-                  ("is not registered", "registration-or-service-error"),
-                  ("operation timed out", "timeout"),
-              ):
-                  if marker in raw:
-                      category = candidate
-                      break
-
-          output_dir = Path(os.environ["OUTPUT_DIR"])
-          (output_dir / "scanner-status.json").write_text(
-              json.dumps({"scanner_exit_code": status,
-                          "diagnostic_category": category}, sort_keys=True) + "\n",
-              encoding="utf-8")
-          (output_dir / "effective-status").write_text(str(status), encoding="utf-8")
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              output.write(f"exit_code={status}\n")
-              output.write(f"diagnostic_category={category}\n")
-          PY
-          effective_status="$(cat "$output_dir/effective-status")"
-
           # Keep a redacted copy of the scanner's output whatever the exit status. A scanner
           # can exit 0 and still leave no usable report, and this is then the only evidence.
           RAW_LOG="$raw_log" OUTPUT_DIR="$output_dir" \
-            SENSITIVE_NSPECT_ID="$INPUT_NSPECT_ID" python3 - <<'PY'
+            SENSITIVE_NSPECT_ID="$INPUT_NSPECT_ID" SENSITIVE_SBOM_NAME="$INPUT_SBOM_NAME" \
+            python3 - <<'PY'
           import os
           import re
           from pathlib import Path
@@ -622,6 +606,7 @@ jobs:
               os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", ""),
               os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""),
               os.environ.get("SENSITIVE_NSPECT_ID", ""),
+              os.environ.get("SENSITIVE_SBOM_NAME", ""),
               os.environ.get("SCANNER_IMAGE_REF", ""),
           ):
               if value:
@@ -656,10 +641,87 @@ jobs:
           destination.chmod(0o600)
           PY
 
+          printf 'exit_code=%s\n' "$scanner_status" >> "$GITHUB_OUTPUT"
+
+      # Log text may only make a result stricter. It names the cause of a failure, or catches
+      # a backend failure the CLI exited 0 on; it never turns a non-zero exit into a pass.
+      - name: Classify scan result
+        id: classify
+        if: always() && steps.scanner.outputs.exit_code != ''
+        env:
+          SCANNER_STATUS: ${{ steps.scanner.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          RAW_LOG="$PULSE_OSS_RAW_LOG" OUTPUT_DIR="$PULSE_OSS_OUTPUT_DIR" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = Path(os.environ["RAW_LOG"]).read_text(
+              encoding="utf-8", errors="replace").lower()
+          exit_code = int(os.environ["SCANNER_STATUS"])
+          # Findings are reported, not failed on (the scan runs --no-fail), so these mark a
+          # completed scan that found something. They explain nothing about a non-zero exit.
+          policy_markers = (
+              "failure_policy_violation",
+              "scan job found",
+          )
+          # Detect exits 3 on a policy violation and the CLI then logs "scan is failed with
+          # status code" for a scan that completed, so these count as a backend failure only
+          # where no policy marker accounts for them.
+          backend_markers = (
+              "rapid scan is failed with status code",
+              "stateless scan is failed with status code",
+          )
+          named = "none"
+          for marker, candidate in (
+              ("github oidc token request failed", "github-identity-error"),
+              ("unable to obtain github oidc", "github-identity-error"),
+              ("charon request failed", "charon-gateway-error"),
+              ("registration verification failed", "registration-or-service-error"),
+              ("nspect verification failed", "registration-or-service-error"),
+              ("invalid nspect id", "registration-or-service-error"),
+              ("is not registered", "registration-or-service-error"),
+              ("operation timed out", "timeout"),
+          ):
+              if marker in raw:
+                  named = candidate
+                  break
+          policy = any(marker in raw for marker in policy_markers)
+          backend = any(marker in raw for marker in backend_markers)
+
+          status = exit_code
+          if exit_code != 0:
+              if named != "none":
+                  category = named
+              elif backend:
+                  category = "downstream-scan-error"
+              else:
+                  category = "scanner-error"
+          elif backend and not policy:
+              category = "downstream-scan-error"
+              status = 70
+          elif policy:
+              category = "vulnerability-policy"
+          else:
+              category = named
+
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          (output_dir / "scanner-status.json").write_text(
+              json.dumps({"scanner_exit_code": exit_code, "effective_status": status,
+                          "diagnostic_category": category}, sort_keys=True) + "\n",
+              encoding="utf-8")
+          (output_dir / "effective-status").write_text(str(status), encoding="utf-8")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"effective_status={status}\n")
+              output.write(f"diagnostic_category={category}\n")
+          PY
+          effective_status="$(cat "$PULSE_OSS_OUTPUT_DIR/effective-status")"
+
           if [[ "$effective_status" -ne 0 ]]; then
             # Put the reason in the log. Downloading an artifact to read one line of
             # sanitized output is too slow a diagnosis for a failing pipeline.
-            failure_log="$output_dir/scanner-failure.log"
+            failure_log="$PULSE_OSS_OUTPUT_DIR/scanner-failure.log"
             excerpt="$(grep -m1 -iE '^[[:space:]]*error[: ]' "$failure_log" || true)"
             [[ -n "$excerpt" ]] \
               || excerpt="$(grep -v '^[[:space:]]*$' "$failure_log" | tail -n 1 || true)"
@@ -672,9 +734,9 @@ jobs:
 
       - name: Validate scan report
         id: report
-        # A failed scanner writes no report, so validating it would only report the
-        # symptom and bury the cause.
-        if: always() && steps.scanner.outputs.exit_code == '0'
+        # A failed scanner leaves no report worth reading, so validating it would only report
+        # the symptom and bury the cause.
+        if: always() && steps.classify.outputs.effective_status == '0'
         env:
           INPUT_NSPECT_ID: ${{ inputs.nspect_id }}
         run: |
@@ -833,7 +895,7 @@ jobs:
           SEVERITY_BREAKDOWN: ${{ steps.report.outputs.severity_breakdown || 'unavailable' }}
           UNFILTERED_COUNT: ${{ steps.report.outputs.unfiltered_count }}
           REPORT_STATUS: ${{ steps.report.outcome }}
-          DIAGNOSTIC_CATEGORY: ${{ steps.scanner.outputs.diagnostic_category || 'none' }}
+          DIAGNOSTIC_CATEGORY: ${{ steps.classify.outputs.diagnostic_category || 'none' }}
           SCANNER_EXIT: ${{ steps.scanner.outputs.exit_code || 'unavailable' }}
         run: |
           {
@@ -887,7 +949,7 @@ jobs:
           retention-days: 3
 
       - name: Upload sanitized failure diagnostics
-        if: always() && (steps.scanner.outputs.exit_code != '0' || steps.report.outcome == 'failure')
+        if: always() && (steps.classify.outputs.effective_status != '0' || steps.report.outcome == 'failure')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pulse-oss-scan-failure-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -902,30 +964,36 @@ jobs:
         env:
           FAILURE_POLICY: ${{ inputs.failure_policy }}
           FINDING_COUNT: ${{ steps.report.outputs.finding_count || '0' }}
+          UNFILTERED_COUNT: ${{ steps.report.outputs.unfiltered_count }}
           REPORT_STATUS: ${{ steps.report.outcome }}
-          SCANNER_EXIT: ${{ steps.scanner.outputs.exit_code || '' }}
-          DIAGNOSTIC_CATEGORY: ${{ steps.scanner.outputs.diagnostic_category || 'unavailable' }}
+          EFFECTIVE_STATUS: ${{ steps.classify.outputs.effective_status || '' }}
+          DIAGNOSTIC_CATEGORY: ${{ steps.classify.outputs.diagnostic_category || 'unavailable' }}
         run: |
           set -euo pipefail
           # Fail closed: a missing, malformed, or credential-bearing report is never a pass.
-          if [[ -z "$SCANNER_EXIT" ]]; then
+          if [[ -z "$EFFECTIVE_STATUS" ]]; then
             echo "::error::The scan did not run to completion — no scanner exit code was recorded."
             exit 1
           fi
-          # Before the exit code: a blocked policy makes the exit a consequence of findings.
-          if [[ "$FAILURE_POLICY" == fail-on-vulnerability && "$REPORT_STATUS" == success ]] \
-            && (( FINDING_COUNT > 0 )); then
-            echo "::error::Pulse OSS scan: ${FINDING_COUNT} vulnerability finding(s) violate failure_policy=fail-on-vulnerability."
-            exit 1
-          fi
-          # Before the report status: the scanner is the cause, the missing report only
-          # the symptom, and naming the symptom sends the reader down the wrong path.
-          if [[ "$SCANNER_EXIT" != 0 ]]; then
-            echo "::error::Pulse OSS scan failed before it produced a report (${DIAGNOSTIC_CATEGORY}). See the sanitized scanner output in the scan step."
+          # First, whatever the report holds: findings never excuse a failed scan, and naming
+          # a missing report instead would send the reader after the symptom.
+          if [[ "$EFFECTIVE_STATUS" != 0 ]]; then
+            echo "::error::The Pulse OSS scan failed (${DIAGNOSTIC_CATEGORY}), so none of its output is trusted. See the sanitized scanner output under Classify scan result."
             exit 1
           fi
           if [[ "$REPORT_STATUS" != success ]]; then
             echo "::error::The scan did not produce a safe, valid report."
+            exit 1
+          fi
+          # A policy violation needs findings to account for it, before or after exceptions;
+          # without any, a pass would rest on log text rather than on the report.
+          if [[ "$DIAGNOSTIC_CATEGORY" == vulnerability-policy ]] \
+            && (( ${UNFILTERED_COUNT:-$FINDING_COUNT} == 0 )); then
+            echo "::error::The scanner reported a policy violation, but the validated report holds no findings to account for it, so the result is not a pass."
+            exit 1
+          fi
+          if [[ "$FAILURE_POLICY" == fail-on-vulnerability ]] && (( FINDING_COUNT > 0 )); then
+            echo "::error::Pulse OSS scan: ${FINDING_COUNT} vulnerability finding(s) violate failure_policy=fail-on-vulnerability."
             exit 1
           fi
           if (( FINDING_COUNT > 0 )); then
