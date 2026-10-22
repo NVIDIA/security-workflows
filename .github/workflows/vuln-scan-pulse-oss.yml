@@ -655,6 +655,15 @@ jobs:
               r"x-amz-(?:signature|credential|security-token)|"
               r"x-goog-(?:signature|credential)|x-ms-(?:sig|signature|se))"
           )
+
+          # Like \b, but a header may also follow a literal "\n" escape, as in HTTP debug output.
+          boundary = r"(?:(?<![A-Za-z0-9_])|(?<=\\[nrt]))"
+
+          def redact_value(match):
+              value = match.group(2)
+              quote = value[0] if len(value) > 1 and value[0] in "\"'" and value[-1] == value[0] else ""
+              return f"{match.group(1)}{quote}[REDACTED]{quote}"
+
           patterns = (
               (re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]"), ""),
               (re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
@@ -662,8 +671,10 @@ jobs:
                "[REDACTED_JWT]"),
               (re.compile(rf"(?im)^([ \t]*(?:proxy[-_ .]?)?authorization[ \t]*[:=][ \t]*"
                           rf"{auth_scheme}[ \t]+)[^\r\n]+"), r"\1[REDACTED]"),
-              (re.compile(r"(?im)^([ \t]*(?:cookie|set-cookie)[ \t]*[:=][ \t]*)[^\r\n]+"),
-               r"\1[REDACTED]"),
+              # Any position, quoted or not, so every cookie pair is redacted, not only the first.
+              (re.compile(rf"""(?i)({boundary}(?:set[-_]?)?cookie["']?[ \t]*[:=][ \t]*)"""
+                          r"""("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\r\n]*\S)"""),
+               redact_value),
               (re.compile(rf"(?i)((?:--)?[\"']?{secret_key}[\"']?\s*[:=]\s*[\"']?"
                           rf"(?!(?:{auth_scheme}\s+)?\[REDACTED)(?:{auth_scheme}\s+)?)"
                           rf"[^\s\"',;}}\]]+"), r"\1[REDACTED]"),
@@ -676,13 +687,17 @@ jobs:
           for pattern, replacement in patterns:
               raw = pattern.sub(replacement, raw)
 
-          # Whitespace stays inside each lookahead; otherwise backtracking matches redacted values.
+          # Any position, quoted or not; whitespace stays inside each lookahead to skip redacted values.
+          marker = r"[\"']?\[REDACTED[A-Z_]*\]"
           residual_patterns = (
               re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
                          r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
-              re.compile(rf"(?im)^[ \t]*(?:proxy[-_ .]?)?authorization[ \t]*[:=][ \t]*"
-                         rf"{auth_scheme}(?![ \t]*\[REDACTED\])[ \t]+\S"),
-              re.compile(r"(?im)^[ \t]*(?:cookie|set-cookie)[ \t]*[:=](?![ \t]*\[REDACTED\])[ \t]*\S"),
+              re.compile(rf"(?i){boundary}(?:proxy[-_ ]?)?authorization[\"']?[ \t]*[:=][ \t]*[\"']?"
+                         rf"{auth_scheme}(?![ \t]*\[REDACTED[A-Z_]*\])[ \t]+\S"),
+              re.compile(rf"(?i){boundary}(?:set[-_]?)?cookie[\"']?[ \t]*[:=](?![ \t]*{marker})[ \t]*\S"),
+              # A cookie pair left after the marker means only part of the value was redacted.
+              re.compile(rf"(?i){boundary}(?:set[-_]?)?cookie[\"']?[ \t]*[:=][ \t]*{marker}"
+                         r"[^\r\n]*?[;,][ \t]*[\w.-]+="),
               re.compile(rf"(?i)[?&]{signed_url_key}=(?!\[REDACTED\])[^&#\s\"'<>)]+"),
           )
           # Drop only matching lines so the remaining diagnostics stay visible.

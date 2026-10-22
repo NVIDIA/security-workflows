@@ -830,10 +830,17 @@ jobs:
           Authorization: Bearer  fake-two-space-token
           Cookie: session=fake-session; csrftoken=fake-csrf
           Set-Cookie: auth=fake-cookie; HttpOnly; Secure
+          2026-10-22T17:00:00.123Z DEBUG Cookie: session=fake-ts-session; csrftoken=fake-ts-csrf
+          {"headers": {"Cookie": "session=fake-json-session; csrftoken=fake-json-csrf", "Accept": "application/json"}}
+          {'set-cookie': 'sid=fake-dict-sid; theme=fake-dict-theme'}
+          send: b'GET /x HTTP/1.1\r\nCookie: a=fake-wire-a; b=fake-wire-b\r\n'
           Download: https://example.invalid/object?X-Amz-Credential=fake-credential&X-Amz-Signature=fake-signature&X-Amz-Security-Token=fake-security-token
           GCS: https://storage.example.invalid/object?X-Goog-Credential=fake-google-credential&X-Goog-Signature=fake-google-signature
           Azure: https://blob.example.invalid/object?sig=fake-azure-signature&se=2099-01-01
           LOG
+          # Built at run time so no JWT-shaped literal is committed.
+          jwt="eyJ$(printf 'a%.0s' $(seq 12)).$(printf 'b%.0s' $(seq 12)).$(printf 'c%.0s' $(seq 12))"
+          printf '2026-10-22T17:00:01Z Authorization: Bearer %s\n' "$jwt" >> "$work/raw.log"
 
           RAW_LOG="$work/raw.log" OUTPUT_DIR="$work/out" \
           ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-actions-token \
@@ -860,6 +867,15 @@ jobs:
             'fake-google-credential'
             'fake-google-signature'
             'fake-azure-signature'
+            'fake-ts-session'
+            'fake-ts-csrf'
+            'fake-json-session'
+            'fake-json-csrf'
+            'fake-dict-sid'
+            'fake-dict-theme'
+            'fake-wire-a'
+            'fake-wire-b'
+            "$jwt"
           )
           for value in "${forbidden[@]}"; do
             if grep -qF "$value" "$sanitized"; then
@@ -877,6 +893,11 @@ jobs:
             'Authorization: Bearer  [REDACTED]'
             'Cookie: [REDACTED]'
             'Set-Cookie: [REDACTED]'
+            'DEBUG Cookie: [REDACTED]'
+            '{"headers": {"Cookie": "[REDACTED]", "Accept": "application/json"}}'
+            "{'set-cookie': '[REDACTED]'}"
+            '\nCookie: [REDACTED]'
+            'Authorization: Bearer [REDACTED_JWT]'
             'X-Amz-Signature=[REDACTED]'
           )
           for value in "${required[@]}"; do
