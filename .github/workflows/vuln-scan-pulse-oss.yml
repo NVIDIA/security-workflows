@@ -130,10 +130,10 @@ jobs:
     env:
       SCANNER_IMAGE_REF: ${{ vars.VULN_SCAN_PULSE_OSS_IMAGE }}:${{ vars.VULN_SCAN_PULSE_OSS_IMAGE_TAG }}
       SCANNER_IMAGE_ALLOWED_REGISTRY: nvcr.io
-      CHARON_PROXY_SERVER: ext-nv-prd-apps.teleport.sh:443
-      CHARON_JOIN_TOKEN: charon-gha-runners
-      CHARON_APP_NAME: charon
-      CHARON_LOCAL_PORT: "8888"
+      CHARON_PROXY_SERVER: ${{ vars.CHARON_PROXY_SERVER }}
+      CHARON_JOIN_TOKEN: ${{ vars.CHARON_JOIN_TOKEN }}
+      CHARON_APP_NAME: ${{ vars.CHARON_APP_NAME }}
+      CHARON_LOCAL_PORT: ${{ vars.CHARON_LOCAL_PORT }}
       CHARON_CLIENT_VERSION: ${{ vars.VULN_SCAN_TUNNEL_CLIENT_VERSION || 'auto' }}
     steps:
       - name: Validate scan contract
@@ -172,6 +172,15 @@ jobs:
             NVCR_VAULT_NAMESPACE NVCR_VAULT_SECRET_PATH; do
             [[ -n "${!name:-}" ]] || missing+=("$name")
           done
+          for spec in \
+            CHARON_PROXY_SERVER:CHARON_PROXY_SERVER \
+            CHARON_JOIN_TOKEN:CHARON_JOIN_TOKEN \
+            CHARON_APP_NAME:CHARON_APP_NAME \
+            CHARON_LOCAL_PORT:CHARON_LOCAL_PORT; do
+            variable_name="${spec%%:*}"
+            env_name="${spec#*:}"
+            [[ -n "${!env_name:-}" ]] || missing+=("$variable_name")
+          done
           if (( ${#missing[@]} > 0 )); then
             echo "::error::Missing Actions variable(s): ${missing[*]}. They must be visible to the calling repository — ask the GitHub-First platform team to provision them for this organization."
             exit 1
@@ -192,6 +201,28 @@ jobs:
             && { [[ ! "$CHARON_CLIENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] \
               || [[ "$CHARON_CLIENT_VERSION" == *".."* ]]; }; then
             echo "::error::VULN_SCAN_TUNNEL_CLIENT_VERSION must be a bare semantic version, or unset to resolve it from the proxy."
+            exit 1
+          fi
+          if [[ ! "$CHARON_PROXY_SERVER" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$ ]]; then
+            echo "::error::CHARON_PROXY_SERVER must be a host:port value."
+            exit 1
+          fi
+          charon_proxy_port="${CHARON_PROXY_SERVER##*:}"
+          if (( 10#$charon_proxy_port < 1 || 10#$charon_proxy_port > 65535 )); then
+            echo "::error::CHARON_PROXY_SERVER must use a TCP port from 1 to 65535."
+            exit 1
+          fi
+          if [[ ! "$CHARON_JOIN_TOKEN" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+            echo "::error::CHARON_JOIN_TOKEN must be a simple token name with no whitespace or control characters."
+            exit 1
+          fi
+          if [[ ! "$CHARON_APP_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::CHARON_APP_NAME must be a simple application name."
+            exit 1
+          fi
+          if [[ ! "$CHARON_LOCAL_PORT" =~ ^[0-9]+$ ]] \
+            || (( 10#$CHARON_LOCAL_PORT < 1024 || 10#$CHARON_LOCAL_PORT > 65535 )); then
+            echo "::error::CHARON_LOCAL_PORT must be an unprivileged TCP port from 1024 to 65535."
             exit 1
           fi
           # Set only when the caller granted id-token: write, so presence is the grant check.

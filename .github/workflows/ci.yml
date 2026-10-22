@@ -513,6 +513,10 @@ jobs:
             IMAGE_REF="$GOOD_IMAGE"; CLIENT_VERSION=auto
             OIDC_URL=https://oidc.example.invalid/token; OIDC_TOKEN=placeholder-not-a-real-token
             VAULT_URL=https://vault.example.invalid
+            CHARON_PROXY=proxy.example.invalid:443
+            CHARON_JOIN=charon-test-token
+            CHARON_APP=charon-test-app
+            CHARON_PORT=8888
             NSPECT_ID=NSPECT-ABCD-1234; REGISTERED_BRANCH=main; SBOM_NAME=
             SCAN_MODE=rapid; SCAN_PATH=.; FAILURE_POLICY=report-only
             WRITEBACK=false; TIMEOUT=1800
@@ -529,6 +533,8 @@ jobs:
             ACTIONS_ID_TOKEN_REQUEST_TOKEN="$OIDC_TOKEN" \
             SCANNER_IMAGE_REF="$IMAGE_REF" SCANNER_IMAGE_ALLOWED_REGISTRY="$ALLOWED_REGISTRY" \
             CHARON_CLIENT_VERSION="$CLIENT_VERSION" \
+            CHARON_PROXY_SERVER="$CHARON_PROXY" CHARON_JOIN_TOKEN="$CHARON_JOIN" \
+            CHARON_APP_NAME="$CHARON_APP" CHARON_LOCAL_PORT="$CHARON_PORT" \
             NV_VAULT_URL="$VAULT_URL" NVCR_VAULT_ROLE=role NVCR_VAULT_JWT_PATH=jwt-path \
             NVCR_VAULT_NAMESPACE=namespace NVCR_VAULT_SECRET_PATH=secret/path \
             INPUT_NSPECT_ID="$NSPECT_ID" \
@@ -604,6 +610,20 @@ jobs:
           # surface as the Vault action's "Input required and not supplied: url".
           reset_case; VAULT_URL=
           expect_rejected "a missing Vault variable is named" "NV_VAULT_URL"
+          reset_case; CHARON_PROXY=
+          expect_rejected "a missing Charon proxy variable is named" "CHARON_PROXY_SERVER"
+          reset_case; CHARON_PROXY=proxy.example.invalid:99999
+          expect_rejected "a Charon proxy port above the TCP range is rejected" "port from 1 to 65535"
+          reset_case; CHARON_PROXY=proxy.example.invalid/path:443
+          expect_rejected "a malformed Charon proxy is rejected" "host:port"
+          reset_case; CHARON_JOIN="$(printf 'charon\nrunners')"
+          expect_rejected "a Charon join token with a control character is rejected" "JOIN_TOKEN"
+          reset_case; CHARON_APP="-charon"
+          expect_rejected "a Charon app name with a leading dash is rejected" "APP_NAME"
+          reset_case; CHARON_PORT=80
+          expect_rejected "a privileged Charon local port is rejected" "unprivileged TCP port"
+          reset_case; CHARON_PORT=not-a-port
+          expect_rejected "a non-numeric Charon local port is rejected" "unprivileged TCP port"
 
           # The scanner image is caller-supplied through vars; only a digest pin under the
           # allowed prefix may run. The tag itself is mutable by design (see the job env),
