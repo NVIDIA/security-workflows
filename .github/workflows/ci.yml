@@ -827,6 +827,7 @@ jobs:
           Authorization: Basic ZmFrZS11c2VyOmZha2UtcGFzcw==
           Authorization: Token fake-token-value
           Proxy-Authorization: Bearer fake-proxy-token
+          Authorization: Bearer  fake-two-space-token
           Cookie: session=fake-session; csrftoken=fake-csrf
           Set-Cookie: auth=fake-cookie; HttpOnly; Secure
           Download: https://example.invalid/object?X-Amz-Credential=fake-credential&X-Amz-Signature=fake-signature&X-Amz-Security-Token=fake-security-token
@@ -849,6 +850,7 @@ jobs:
             'ZmFrZS11c2VyOmZha2UtcGFzcw=='
             'fake-token-value'
             'fake-proxy-token'
+            'fake-two-space-token'
             'fake-session'
             'fake-csrf'
             'fake-cookie'
@@ -866,7 +868,30 @@ jobs:
               exit 1
             fi
           done
-          echo "Scanner failure log sanitizer redacted auth headers, cookies, and signed URL credentials."
+
+          # Leak checks also pass on an empty log; require diagnostics and redacted lines to remain.
+          required=(
+            'ERROR: request failed'
+            'Authorization: Basic [REDACTED]'
+            'Proxy-Authorization: Bearer [REDACTED]'
+            'Authorization: Bearer  [REDACTED]'
+            'Cookie: [REDACTED]'
+            'Set-Cookie: [REDACTED]'
+            'X-Amz-Signature=[REDACTED]'
+          )
+          for value in "${required[@]}"; do
+            if ! grep -qF "$value" "$sanitized"; then
+              echo "::error::sanitized scanner failure log lost safe content: ${value}"
+              cat "$sanitized"
+              exit 1
+            fi
+          done
+          if grep -qE 'line removed|\[REDACTED\]\]' "$sanitized"; then
+            echo "::error::sanitized scanner failure log dropped a redacted line or doubled a redaction marker"
+            cat "$sanitized"
+            exit 1
+          fi
+          echo "Scanner failure log sanitizer redacted auth headers, cookies, and signed URL credentials, and kept the rest readable."
 
       - name: Assert log text never turns a failed scan into a pass
         env:

@@ -664,8 +664,9 @@ jobs:
                           rf"{auth_scheme}[ \t]+)[^\r\n]+"), r"\1[REDACTED]"),
               (re.compile(r"(?im)^([ \t]*(?:cookie|set-cookie)[ \t]*[:=][ \t]*)[^\r\n]+"),
                r"\1[REDACTED]"),
-              (re.compile(rf"(?i)((?:--)?[\"']?{secret_key}[\"']?\s*[:=]\s*"
-                          rf"[\"']?(?:{auth_scheme}\s+)?)[^\s\"',;}}\]]+"), r"\1[REDACTED]"),
+              (re.compile(rf"(?i)((?:--)?[\"']?{secret_key}[\"']?\s*[:=]\s*[\"']?"
+                          rf"(?!(?:{auth_scheme}\s+)?\[REDACTED)(?:{auth_scheme}\s+)?)"
+                          rf"[^\s\"',;}}\]]+"), r"\1[REDACTED]"),
               (re.compile(r"(?i)\b(basic|bearer|token)\s+[A-Za-z0-9._~+/=-]+"),
                r"\1 [REDACTED]"),
               (re.compile(rf"(?i)([?&]{signed_url_key}=)[^&#\s\"'<>)]+"),
@@ -675,19 +676,21 @@ jobs:
           for pattern, replacement in patterns:
               raw = pattern.sub(replacement, raw)
 
+          # Whitespace stays inside each lookahead; otherwise backtracking matches redacted values.
           residual_patterns = (
               re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
                          r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
               re.compile(rf"(?im)^[ \t]*(?:proxy[-_ .]?)?authorization[ \t]*[:=][ \t]*"
-                         rf"{auth_scheme}[ \t]+(?!\[REDACTED\])[^\r\n]+"),
-              re.compile(r"(?im)^[ \t]*(?:cookie|set-cookie)[ \t]*[:=][ \t]*(?!\[REDACTED\])[^\r\n]+"),
+                         rf"{auth_scheme}(?![ \t]*\[REDACTED\])[ \t]+\S"),
+              re.compile(r"(?im)^[ \t]*(?:cookie|set-cookie)[ \t]*[:=](?![ \t]*\[REDACTED\])[ \t]*\S"),
               re.compile(rf"(?i)[?&]{signed_url_key}=(?!\[REDACTED\])[^&#\s\"'<>)]+"),
           )
-          if any(pattern.search(raw) for pattern in residual_patterns):
-              raw = (
-                  "Sanitized scanner output suppressed: credential-shaped content "
-                  "remained after redaction.\n"
-              )
+          # Drop only matching lines so the remaining diagnostics stay visible.
+          raw = "".join(
+              "[line removed: credential-shaped content remained after redaction]\n"
+              if any(pattern.search(line) for pattern in residual_patterns) else line
+              for line in raw.splitlines(keepends=True)
+          )
 
           limit = 2_000_000
           if len(raw) > limit:
