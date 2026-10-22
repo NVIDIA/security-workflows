@@ -471,17 +471,25 @@ jobs:
           for filename, step_name in {
               "contract.sh": "Validate scan contract",
               "scan-path.sh": "Validate scan path",
+              "log-sanitizer.py": "Pulse OSS vulnerability scan",
               "classify.sh": "Classify scan result",
               "report.sh": "Validate scan report",
               "enforce.sh": "Enforce scan result",
           }.items():
               # KeyError here is the point: a renamed step must fail loudly, not test nothing.
-              (temp / filename).write_text(steps[step_name]["run"])
+              script = steps[step_name]["run"]
+              if filename == "log-sanitizer.py":
+                  marker = "SENSITIVE_NSPECT_ID=\"$INPUT_NSPECT_ID\" SENSITIVE_SBOM_NAME=\"$INPUT_SBOM_NAME\""
+                  start = script.index(marker)
+                  start = script.index("python3 - <<'PY'\n", start) + len("python3 - <<'PY'\n")
+                  end = script.index("\nPY", start)
+                  script = script[start:end]
+              (temp / filename).write_text(script)
           # Source the allowed image prefix from the workflow so the test cannot drift from it.
           (temp / "job-env.sh").write_text(
               "ALLOWED_REGISTRY=%s\n" % job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"])
           PY
-          for f in contract.sh scan-path.sh classify.sh report.sh enforce.sh job-env.sh; do
+          for f in contract.sh scan-path.sh log-sanitizer.py classify.sh report.sh enforce.sh job-env.sh; do
             test -s "$RUNNER_TEMP/$f"
           done
 
@@ -785,6 +793,60 @@ jobs:
             exit 1
           fi
           echo "All scan_path cases passed."
+
+      - name: Assert scanner failure log sanitizer redacts credentials
+        env:
+          SANITIZER: ${{ runner.temp }}/log-sanitizer.py
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/log-sanitizer"
+          rm -rf "$work"
+          mkdir -p "$work/out"
+          cat > "$work/raw.log" <<'LOG'
+          ERROR: request failed
+          Authorization: Basic ZmFrZS11c2VyOmZha2UtcGFzcw==
+          Authorization: Token fake-token-value
+          Proxy-Authorization: Bearer fake-proxy-token
+          Cookie: session=fake-session; csrftoken=fake-csrf
+          Set-Cookie: auth=fake-cookie; HttpOnly; Secure
+          Download: https://example.invalid/object?X-Amz-Credential=fake-credential&X-Amz-Signature=fake-signature&X-Amz-Security-Token=fake-security-token
+          GCS: https://storage.example.invalid/object?X-Goog-Credential=fake-google-credential&X-Goog-Signature=fake-google-signature
+          Azure: https://blob.example.invalid/object?sig=fake-azure-signature&se=2099-01-01
+          LOG
+
+          RAW_LOG="$work/raw.log" OUTPUT_DIR="$work/out" \
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-actions-token \
+          ACTIONS_ID_TOKEN_REQUEST_URL=https://token.actions.example.invalid/request \
+          SENSITIVE_NSPECT_ID=NSPECT-TEST-1234 \
+          SENSITIVE_SBOM_NAME=ghf-test-sbom \
+          SCANNER_IMAGE_REF=nvcr.io/example/pulse:test \
+            python3 "$SANITIZER"
+
+          sanitized="$work/out/scanner-failure.log"
+          test -s "$sanitized"
+
+          forbidden=(
+            'ZmFrZS11c2VyOmZha2UtcGFzcw=='
+            'fake-token-value'
+            'fake-proxy-token'
+            'fake-session'
+            'fake-csrf'
+            'fake-cookie'
+            'fake-credential'
+            'fake-signature'
+            'fake-security-token'
+            'fake-google-credential'
+            'fake-google-signature'
+            'fake-azure-signature'
+          )
+          for value in "${forbidden[@]}"; do
+            if grep -qF "$value" "$sanitized"; then
+              echo "::error::sanitized scanner failure log still contains credential fixture: ${value}"
+              cat "$sanitized"
+              exit 1
+            fi
+          done
+          echo "Scanner failure log sanitizer redacted auth headers, cookies, and signed URL credentials."
 
       - name: Assert log text never turns a failed scan into a pass
         env:

@@ -613,24 +613,50 @@ jobs:
                   raw = raw.replace(value, "[REDACTED]")
 
           secret_key = (
-              r"(?:authorization|proxy[_ .-]?authorization|x-charon-gha-token|"
+              r"(?:authorization|proxy[_ .-]?authorization|cookie|set[_ .-]?cookie|"
+              r"x-charon-gha-token|"
               r"(?:[a-z0-9_-]+[.])?api[._ -]?token|access[._ -]?token|id[._ -]?token|"
               r"ssa[._ -]?token|client[._ -]?secret|password)"
+          )
+          auth_scheme = r"(?:basic|bearer|token)"
+          signed_url_key = (
+              r"(?:token|access_token|id_token|jwt|sig|signature|key|secret|"
+              r"x-amz-(?:signature|credential|security-token)|"
+              r"x-goog-(?:signature|credential)|x-ms-(?:sig|signature|se))"
           )
           patterns = (
               (re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]"), ""),
               (re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
                           r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
                "[REDACTED_JWT]"),
+              (re.compile(rf"(?im)^([ \t]*(?:proxy[-_ .]?)?authorization[ \t]*[:=][ \t]*"
+                          rf"{auth_scheme}[ \t]+)[^\r\n]+"), r"\1[REDACTED]"),
+              (re.compile(r"(?im)^([ \t]*(?:cookie|set-cookie)[ \t]*[:=][ \t]*)[^\r\n]+"),
+               r"\1[REDACTED]"),
               (re.compile(rf"(?i)((?:--)?[\"']?{secret_key}[\"']?\s*[:=]\s*"
-                          rf"[\"']?(?:bearer\s+)?)[^\s\"',;}}\]]+"), r"\1[REDACTED]"),
-              (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
-              (re.compile(r"(?i)([?&](?:token|access_token|id_token|jwt|sig|key|secret)=)"
-                          r"[^&#\s]+"), r"\1[REDACTED]"),
+                          rf"[\"']?(?:{auth_scheme}\s+)?)[^\s\"',;}}\]]+"), r"\1[REDACTED]"),
+              (re.compile(r"(?i)\b(basic|bearer|token)\s+[A-Za-z0-9._~+/=-]+"),
+               r"\1 [REDACTED]"),
+              (re.compile(rf"(?i)([?&]{signed_url_key}=)[^&#\s\"'<>)]+"),
+               r"\1[REDACTED]"),
               (re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@"), r"\1[REDACTED]@"),
           )
           for pattern, replacement in patterns:
               raw = pattern.sub(replacement, raw)
+
+          residual_patterns = (
+              re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
+                         r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
+              re.compile(rf"(?im)^[ \t]*(?:proxy[-_ .]?)?authorization[ \t]*[:=][ \t]*"
+                         rf"{auth_scheme}[ \t]+(?!\[REDACTED\])[^\r\n]+"),
+              re.compile(r"(?im)^[ \t]*(?:cookie|set-cookie)[ \t]*[:=][ \t]*(?!\[REDACTED\])[^\r\n]+"),
+              re.compile(rf"(?i)[?&]{signed_url_key}=(?!\[REDACTED\])[^&#\s\"'<>)]+"),
+          )
+          if any(pattern.search(raw) for pattern in residual_patterns):
+              raw = (
+                  "Sanitized scanner output suppressed: credential-shaped content "
+                  "remained after redaction.\n"
+              )
 
           limit = 2_000_000
           if len(raw) > limit:
