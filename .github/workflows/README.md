@@ -9,6 +9,7 @@ Inputs and defaults are documented inline in each workflow's `workflow_call` blo
 |---|---|---|
 | [`security-suite.yml`](security-suite.yml) | Opt-in set of the scans below | Fans out in parallel to the scans the caller enables |
 | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Secret | Pulse Secret Scanner — TruffleHog Enterprise, NVIDIA-licensed, Self-hosted runners only |
+| [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml) | Vulnerability (SCA) | Pulse OSS CLI reporting to nSpect over a Charon tunnel, NVIDIA-internal, Self-hosted runners only |
 | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | SAST | CodeQL (`github/codeql-action`, pinned inside the workflow) |
 
 ## Using a workflow
@@ -57,6 +58,7 @@ turning a default on is treated as a breaking change (see [Versioning](../../REA
 | Input | Enables | Notes |
 |---|---|---|
 | `enable-secret-scan` | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Self-hosted `nv-gha-runners` and the Vault / Pulse variables required. |
+| `enable-vuln-scan` | [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml) | Needs self-hosted `nv-gha-runners`, the Vault / Pulse variables, and a Charon tenant granting the Pulse backends with the calling ref allowlisted. `nspect-id` is optional: without it the scan runs unregistered. |
 | `enable-sast-scan` | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | Requires `sast-languages` — accepted values are listed under [Accepted `languages` values](#accepted-languages-values) — and requires CodeQL Default setup to be **off**. Most repositories should stay on Default setup and leave this off. |
 
 **Grant the union of every scan's permissions, not just the ones you enable.** GitHub
@@ -76,6 +78,10 @@ jobs:
     uses: NVIDIA/security-workflows/.github/workflows/security-suite.yml@<COMMIT-SHA>
     with:
       enable-secret-scan: true
+      # Requires an nSpect registration — see the vulnerability scan section.
+      # nspect-id carries no scan prefix: it identifies the repository, not one scan.
+      # enable-vuln-scan: true
+      # nspect-id: ${{ vars.NSPECT_ID }}
       # Advanced-setup repositories only — leave off if you use CodeQL Default setup:
       # enable-sast-scan: true
       # sast-languages: '["actions"]'
@@ -83,6 +89,16 @@ jobs:
       # Optional category-prefixed overrides:
       # secret-failure-policy: strict
       # secret-runs-on: linux-amd64-cpu4
+      # vuln-runs-on: linux-amd64-cpu4
+      # vuln-scan-path: .
+      # vuln-scan-mode: auto
+      # vuln-build: true                          # Maven / Go
+      # vuln-failure-policy: fail-on-vulnerability
+      # vuln-registered-branch: main
+      # vuln-sbom-name: <SBOM_NAME>               # several SBOM entries on that branch
+      # vuln-inventory-writeback: true            # persistent scans only; needs vuln-sbom-name
+      # vuln-upload-report: true
+      # vuln-timeout-seconds: 1800
       # sast-runs-on: ubuntu-latest
       # sast-build-mode: autobuild
       # sast-queries: +security-and-quality
@@ -93,8 +109,12 @@ jobs:
       # suite-runs-on: linux-amd64-cpu4
 ```
 
-Enabling SAST without `sast-languages` fails the suite with an explicit error rather
-than starting a scan that cannot work.
+Enabling a scan without the input it needs fails the suite with an explicit error rather
+than starting a scan that cannot work — `enable-sast-scan` without `sast-languages`, for
+instance. Every missing companion input is reported in one run.
+
+The suite does not expose the vulnerability scan's `ci_test_setup` input; it exists only
+for this repository's own self-tests.
 
 ### Secret scan — [`secret-scan-pulse.yml`](secret-scan-pulse.yml)
 
@@ -123,6 +143,61 @@ jobs:
     # with:
     #   runs-on: linux-amd64-cpu4   # nv-gha-runners label
     #   failure_policy: strict      # fail on any finding (default: unverified — fail verified, warn unverified)
+```
+
+### Vulnerability scan (SCA) — [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml)
+
+Runs NVIDIA's **Pulse OSS scanner** against the dependency graph under `scan_path` and reports findings to the **nSpect** vulnerability backend, so they become findings of record rather than only CI output.
+The scanner is pulled from `nvcr.io` and reaches nSpect through a Charon application tunnel on loopback. **GitHub OIDC is the only identity presented** — no service account, registry credential, or backend token enters the job. The scanner image is **pinned by digest inside the workflow** (the approved `charon-stable` release), so a caller cannot substitute another image, and every run records the digest it executed in the job summary and the `scanner_image_digest` output. A scanner upgrade is a digest change in this repository. The container runs with no capabilities, cannot acquire any, and sees your checkout read-only.
+
+Scan-specific prerequisites:
+
+- **Self-hosted runners only.** OIDC → Vault, `nvcr.io`, and the Charon tunnel are all unreachable from GitHub-hosted runners.
+- **nSpect registration, if you want findings of record.** Register the repository, set its ID as a repository variable `NSPECT_ID` (format `NSPECT-xxxx-xxxx`), and pass it as `nspect_id`; a malformed ID is refused. Leave it empty and the scan runs unregistered (`--no-nspect`): findings appear in the job but are not recorded against a registration, and the scan is rapid-only, because a persistent scan has no registration to write back to. The variable carries no scan prefix because an nSpect ID belongs to the repository, not to one scan — any future scan reporting to nSpect reads the same one.
+- **Platform variables**, provisioned for the organization by the GitHub-First platform team: `NV_VAULT_URL`, `NVCR_VAULT_ROLE`, `NVCR_VAULT_JWT_PATH`, `NVCR_VAULT_NAMESPACE`, `NVCR_VAULT_SECRET_PATH`. A missing one is named by the preflight rather than surfacing as the Vault action's `Input required and not supplied: url`. The scanner image and the Charon tunnel settings belong to the workflow and are not caller-configurable.
+- **Optional `VULN_SCAN_TUNNEL_CLIENT_VERSION`** pins the Teleport tunnel client to an approved bare semver. Leave it unset and the version is resolved from the Charon proxy; pinning is the supply-chain-safer choice. It is a variable rather than a secret because a client version is configuration — masking it would only remove it from the audit trail.
+- **Trigger model**, identical to the secret scan: the workflow **rejects `pull_request` and `pull_request_target`**, so call it from `push`, `schedule`, or `workflow_dispatch`. Pull-request coverage comes from `copy-pr-bot`'s `pull-request/<n>` mirror branches, added to your `push` filter as the [pilot consumers already do](../../README.md#onboarding-a-repository).
+- **Pull-request mirrors are RAPID-only.** On a `refs/heads/pull-request/*` ref, `scan_mode: auto` resolves to `rapid`, and `persistent` or `inventory_writeback: true` is refused; `registered_branch` can never name a mirror. A mirror carries pull-request content, so it must not create backend state, upload an SBOM, or write inventory. Persistent and write-back scans belong to the registered branch.
+- **Charon tenant and ref allowlist.** Charon authorizes per tenant *and per ref*. Your repository needs a tenant granting the Pulse backends — `pulse-nspect`, `pulse-pms`, `pulse-pcsf`, `pulse-exception-tracker`, `pulse-blackduck`, `pulse-nvdataflow` — and every ref you scan from on its allowlist, including the `pull-request/*` mirrors if the scan is to gate pull requests. A missing backend or an unlisted ref surfaces as an opaque `HTTP 403` from inside the scanner, so get the tenant in place before debugging anything else.
+
+Behaviours to know about before you point it at a path:
+
+- **A symbolic link that points outside the checkout blocks the scan.** Anything under `scan_path` linking out of the scanned tree is refused, because it would smuggle unreviewed content into the container mount. A repository holding one cannot scan `.` until the link is removed or `scan_path` is narrowed around it.
+- **`build: true` executes the repository's build logic.** Maven and Go resolve their dependency graphs only through a build, so the scanner runs that build inside its container, on a host network, with the job's OIDC request variables present. On a `pull-request/*` mirror that build logic comes from the pull request. `copy-pr-bot` mirrors only approved PRs with signed commits from org members or trustees, so this is reviewed rather than arbitrary content, and the container holds no capabilities and sees the checkout read-only — but an approving maintainer is the control. **Prefer `build: true` on post-merge and scheduled runs**, and treat approving a PR that changes build files as approving code execution.
+- **`registered_branch` is the branch reported to nSpect, whichever ref is scanned.** A `rapid` scan of a `pull-request/*` mirror still presents `registered_branch` to the backend, because the registration lookup is keyed on it and sending the mirror's name would not resolve. Rapid scans are stateless and record nothing, so this affects request metadata rather than findings of record — but do not read an nSpect branch as proof of which tree was scanned. A `persistent` scan is refused unless the checked-out ref really is `registered_branch`.
+- **Local allowlisting in no-nSpect mode is TBD.** Local allowlisting is being explored and is not yet validated or supported by this reusable workflow. No-nSpect scans do not retrieve approved exceptions. The CLI may still apply rules found in repository allowlist files, which can affect filtered results and whether the job passes.
+
+`failure_policy` decides only whether *findings* fail the job — the scan always produces the full report. `report-only` (default) warns; `fail-on-vulnerability` blocks on any finding. **Scanner, transport, and report-validation failures block under both**: a missing, malformed, or credential-bearing report is never a pass. The CLI always runs with `--no-fail` and the policy is applied to the validated report, so a non-zero scanner exit is always a failed scan — no finding message in the log can turn it into a pass. **Start on `report-only`** — turning on `fail-on-vulnerability` in an established repository blocks everything on day one over pre-existing findings. Triage first, then flip.
+
+`scan_mode: auto` runs a `persistent` scan (which creates or updates project state in the backend) only on `registered_branch`, and a stateless `rapid` scan everywhere else. Pass `rapid` explicitly where backend state is not wanted at all. Set `build: true` for **Maven** and **Go**, whose dependency graphs resolve only through a build.
+
+Results are the run's job summary plus, with `upload_report: true`, a 3-day artifact. **SARIF publication is a follow-up**, so unlike the secret scan these findings do not appear under code scanning yet.
+
+Key inputs: `nspect_id` (optional — empty runs unregistered), `runs-on` (default `linux-amd64-cpu4`), `registered_branch` (default `main`), `sbom_name` (optional — selects the registration when `registered_branch` has more than one SBOM entry; needs `nspect_id`, required with `inventory_writeback`), `scan_path` (default `.`), `scan_mode` (default `auto`), `build` (default `false`), `failure_policy` (default `report-only`), `inventory_writeback` (default `false`, persistent scans only), `upload_report` (default `false`), `timeout_seconds` (default `1800`, range 60–3600).
+Outputs: `resolved_mode`, `finding_count`, `scanner_exit_code`, `scanner_image_digest`.
+
+```yaml
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+  id-token: write          # OIDC → Vault for the image pull, and → Charon for the scan
+
+jobs:
+  vulnerability-scan:
+    uses: NVIDIA/security-workflows/.github/workflows/vuln-scan-pulse-oss.yml@<COMMIT-SHA>
+    with:
+      nspect_id: ${{ vars.NSPECT_ID }}
+    # Optional overrides — see the workflow file for the full interface:
+    #   runs-on: linux-amd64-cpu4       # nv-gha-runners label
+    #   scan_path: services/api
+    #   build: true                     # Maven / Go
+    #   failure_policy: fail-on-vulnerability
+    #   upload_report: true
 ```
 
 ### SAST — [`sast-scan-codeql.yml`](sast-scan-codeql.yml)
