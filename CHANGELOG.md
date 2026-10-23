@@ -23,10 +23,14 @@ Additive release. Existing suite callers need no change: `enable-vuln-scan` and 
 - CI — contract tests driving the four gates extracted from `malware-scan-pulse.yml` (input contract, verdict classification, report validation, enforcement) and the suite preflight, located by step name so a rename fails extraction rather than silently testing nothing. CI also asserts that the workflow reads neither the scanner image nor the Charon settings from caller variables and accepts only digest references, and extraction fails unless the job timeout comes from `timeout_minutes`. They cover what a live scan cannot: every rejection path, every pairing of exit code and report status, redaction of credential-shaped scanner output, and the blocking verdicts, whose correct outcome is a *failing* job.
 - CI — live integration asserting transport, a CLEAN verdict, and the recorded scanner digest through the workflow outputs, plus a suite self-test, gated on `ENABLE_PULSE_INTEGRATION` like the secret-scan live jobs.
 - Third-party notices — `teleport-actions/setup` and `actions/upload-artifact`, both pinned by SHA, used by the vulnerability and malware scans.
+- GuardWords (pre-commit) — `guardwords-scan-code-scanning` sends the staged diff to NVIDIA's internal code-scanning service and blocks the commit on blocking findings. It is for NVIDIA employees only: where the client or service is unavailable it skips with a notice (`--on-unavailable=fail` fails instead), so external contributors are never blocked. See the [GuardWords hook guide](hooks/guardwords/README.md).
+- GuardWords setup — [`hooks/guardwords/install_client.py`](hooks/guardwords/install_client.py) installs the code-scanning client on an NVIDIA machine and sets `code-scanning.client` and `code-scanning.endpoint` in the global Git configuration, in one command.
+- Pre-commit hook catalogue — [`hooks/README.md`](hooks/README.md) lists every hook, what it needs on the developer's machine, and the rules shared by all hooks, as [`.github/workflows/README.md`](.github/workflows/README.md) does for workflows.
 
 ### Changed
 
 - Security suite — the preflight reports *every* missing companion input in one run rather than exiting on the first.
+- Pin policy — the recommended pre-commit `rev:` pin is now the 40-character commit SHA with the release tag as a `# frozen:` comment, the form `pre-commit autoupdate --freeze` writes, matching the SHA pin already required for reusable workflows. Existing release-tag pins keep working; switch with `pre-commit autoupdate --freeze` at the next refresh. See [Pin policy per surface](README.md#pin-policy-per-surface).
 
 ### Known limitations
 
