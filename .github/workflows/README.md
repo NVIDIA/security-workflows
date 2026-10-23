@@ -10,6 +10,7 @@ Inputs and defaults are documented inline in each workflow's `workflow_call` blo
 | [`security-suite.yml`](security-suite.yml) | Opt-in set of the scans below | Fans out in parallel to the scans the caller enables |
 | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Secret | Pulse Secret Scanner — TruffleHog Enterprise, NVIDIA-licensed, Self-hosted runners only |
 | [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml) | Vulnerability (SCA) | Pulse OSS CLI reporting to nSpect over a Charon tunnel, NVIDIA-internal, Self-hosted runners only |
+| [`malware-scan-pulse.yml`](malware-scan-pulse.yml) | Malware | Pulse Malware Service (ReversingLabs), which fetches the commit itself over a Charon tunnel, NVIDIA-internal, Self-hosted runners only |
 | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | SAST | CodeQL (`github/codeql-action`, pinned inside the workflow) |
 
 ## Using a workflow
@@ -59,6 +60,7 @@ turning a default on is treated as a breaking change (see [Versioning](../../REA
 |---|---|---|
 | `enable-secret-scan` | [`secret-scan-pulse.yml`](secret-scan-pulse.yml) | Self-hosted `nv-gha-runners` and the Vault / Pulse variables required. |
 | `enable-vuln-scan` | [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml) | Needs self-hosted `nv-gha-runners`, the Vault / Pulse variables, and a Charon tenant granting the Pulse backends with the calling ref allowlisted. `nspect-id` is optional: without it the scan runs unregistered. |
+| `enable-malware-scan` | [`malware-scan-pulse.yml`](malware-scan-pulse.yml) | Requires `nspect-id` (the repository's nSpect ID), self-hosted `nv-gha-runners`, the Vault, scanner-image, and Charon variables, and the calling ref and the scan's routes on the repository's Charon tenant. |
 | `enable-sast-scan` | [`sast-scan-codeql.yml`](sast-scan-codeql.yml) | Requires `sast-languages` — accepted values are listed under [Accepted `languages` values](#accepted-languages-values) — and requires CodeQL Default setup to be **off**. Most repositories should stay on Default setup and leave this off. |
 
 **Grant the union of every scan's permissions, not just the ones you enable.** GitHub
@@ -78,9 +80,10 @@ jobs:
     uses: NVIDIA/security-workflows/.github/workflows/security-suite.yml@<COMMIT-SHA>
     with:
       enable-secret-scan: true
-      # Requires an nSpect registration — see the vulnerability scan section.
+      # Requires an nSpect registration — see the vulnerability and malware scan sections.
       # nspect-id carries no scan prefix: it identifies the repository, not one scan.
       # enable-vuln-scan: true
+      # enable-malware-scan: true
       # nspect-id: ${{ vars.NSPECT_ID }}
       # Advanced-setup repositories only — leave off if you use CodeQL Default setup:
       # enable-sast-scan: true
@@ -99,6 +102,10 @@ jobs:
       # vuln-inventory-writeback: true            # persistent scans only; needs vuln-sbom-name
       # vuln-upload-report: true
       # vuln-timeout-seconds: 1800
+      # malware-runs-on: linux-amd64-cpu4
+      # malware-failure-policy: malicious-only
+      # malware-upload-report: true
+      # malware-timeout-minutes: 90
       # sast-runs-on: ubuntu-latest
       # sast-build-mode: autobuild
       # sast-queries: +security-and-quality
@@ -110,8 +117,9 @@ jobs:
 ```
 
 Enabling a scan without the input it needs fails the suite with an explicit error rather
-than starting a scan that cannot work — `enable-sast-scan` without `sast-languages`, for
-instance. Every missing companion input is reported in one run.
+than starting a scan that cannot work — `enable-sast-scan` without `sast-languages`, or
+`enable-malware-scan` without `nspect-id`. Every missing companion input is reported in
+one run.
 
 The suite does not expose the vulnerability scan's `ci_test_setup` input; it exists only
 for this repository's own self-tests.
@@ -198,6 +206,58 @@ jobs:
     #   build: true                     # Maven / Go
     #   failure_policy: fail-on-vulnerability
     #   upload_report: true
+```
+
+### Malware scan — [`malware-scan-pulse.yml`](malware-scan-pulse.yml)
+
+Asks NVIDIA's **Pulse Malware Service** to scan the calling run's commit with ReversingLabs. **Nothing is checked out**: the job sends only identifiers — the repository, commit SHA, nSpect ID, and tenant — through the production Charon application tunnel on loopback, and the service fetches that commit from GitHub itself. **GitHub OIDC is the only identity the scan presents**: Charon adds the service credential on its side, so no service account or backend token enters the job. Apart from tokens minted from OIDC, the job's only credential is the `nvcr.io` pull login, which it reads from Vault with its OIDC token. The scanner container runs with no capabilities and cannot acquire any.
+The scan target is always `github.repository` at `github.sha`; no input can point the service at another repository, or at a commit already known to be clean.
+
+Scan-specific prerequisites:
+
+- **Self-hosted runners only.** OIDC → Vault, `nvcr.io`, and the Charon tunnel are all unreachable from GitHub-hosted runners.
+- **nSpect registration.** Register the repository and set its ID as a repository variable `NSPECT_ID`, then pass it as `nspect_id`. The scanner accepts only the uppercase form, `NSPECT-XXXX-XXXX`, so the workflow refuses anything else before it pulls the image.
+- **Platform variables**, provisioned for the organization by the GitHub-First platform team: `NV_VAULT_URL`, `NVCR_VAULT_ROLE`, `NVCR_VAULT_JWT_PATH`, `NVCR_VAULT_NAMESPACE`, `NVCR_VAULT_SECRET_PATH`. A missing one is named by the workflow rather than surfacing later as a Vault failure. The Charon tunnel settings are owned by the workflow, not read from variables: it fixes the production proxy, join token, application, and local port, so a caller cannot send the scan, or the job's OIDC token, through another proxy.
+- **Scanner image pinned by digest inside the workflow** (the approved `1.3.0` release), so a caller cannot substitute another image, and every run records the digest it executed in the job summary and the `scanner_image_digest` output. Neither `MALWARE_SCAN_PULSE_IMAGE` nor `MALWARE_SCAN_PULSE_IMAGE_TAG` is read. A scanner upgrade is a digest change in this repository, so a new scanner release reaches callers as a new release of this workflow.
+- **Optional `MALWARE_SCAN_TUNNEL_CLIENT_VERSION`** pins the Teleport tunnel client to an approved bare semver. Leave it unset and the version is resolved from the Charon proxy; pinning is the supply-chain-safer choice.
+- **Trigger model**, identical to the secret scan: the workflow **rejects `pull_request` and `pull_request_target`**, so call it from `push`, `schedule`, or `workflow_dispatch`. Pull-request coverage comes from `copy-pr-bot`'s `pull-request/<n>` mirror branches, added to your `push` filter as the [pilot consumers already do](../../README.md#onboarding-a-repository).
+- **Charon allowlist — refs *and* routes.** Charon authorizes per tenant, per ref, and per route, so the repository's tenant must list the calling ref and every nSpect and Pulse Malware Service route the scan uses. The scan-submission route is not in the set tenants are granted by default and needs platform approval. A ref or route the tenant does not list fails the scan; it never passes it. A tenant that does not list the copy-pr-bot mirror refs (`refs/heads/pull-request/*`) makes this scan a post-merge and scheduled gate rather than a merge gate.
+- **The service must be able to read the repository.** It fetches the commit with its own GitHub access; a repository it cannot read fails the scan.
+
+`failure_policy` decides only what a **SUSPICIOUS** verdict does: `strict` (default) blocks it, `malicious-only` reports it as a warning. **A MALICIOUS verdict blocks under both, and so does every scan that ends without a verdict** — a transport failure, timeout, scanner crash, FAILED scan, or a report that disagrees with the scanner's exit code is never a pass. The job log names the cause as a diagnostic category, and a sanitized copy of the scanner's output is printed and kept as a 3-day artifact: tokens, auth headers, cookies, and signed-URL credentials are redacted from it, and it is withheld entirely if anything credential-shaped survives. Prefer `strict`. `malicious-only` is a triage mode for repositories that must work through SUSPICIOUS results before they can gate on them, not a release gate: a release needs a CLEAN verdict, which only `strict` enforces.
+
+A MALICIOUS verdict is a security event, not a flaky check: re-running the job scans the same commit again, so it is not a way to clear one. Escalate it to NVIDIA Product Security.
+
+Every run scans the whole tree at the commit, not a diff; a commit the service has already scanned may be served from its cache.
+
+`timeout_minutes` (default `60`, from 10 to 360) is the job timeout, and the scanner's report polling is derived from it: the sleep between attempts doubles from 2 seconds to a 120-second cap, and polling stops 5 minutes before the timeout, which leaves time for the steps around it. With the default, the scan waits up to about 54 minutes for its report. A scan that outlasts the budget fails as `timeout`, closed like every scan without a verdict, rather than as a cancelled job with no diagnostic. Raise it for repositories the service takes longer to scan.
+
+Results are the job summary — verdict, flagged-item breakdown, allowlist and cache state, and the **Pulse scan ID**, the join key to the service's record of the scan — plus, with `upload_report: true`, the validated report as a 3-day artifact with the nSpect ID redacted. A report carrying anything credential-shaped is withheld from the artifact with a warning; the verdict is unaffected. Findings do not appear under code scanning.
+The scanner image and the Charon tunnel are fixed in the workflow, but the runner and the Vault variables are still the *caller's*, so the service's record found by the Pulse scan ID — not the job's own verdict — is the record of account. The job summary and the `scanner_image_digest` output record the image digest each run used.
+
+Key inputs: `nspect_id` (required), `runs-on` (default `linux-amd64-cpu4`), `failure_policy` (default `strict`), `upload_report` (default `false`), `timeout_minutes` (default `60`).
+Outputs: `verdict`, `flagged_count`, `scanner_exit_code`, `scan_id`, `scanner_image_digest`.
+
+```yaml
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  id-token: write          # OIDC → Vault for the image pull, and → Charon for the scan
+
+jobs:
+  malware-scan:
+    uses: NVIDIA/security-workflows/.github/workflows/malware-scan-pulse.yml@<COMMIT-SHA>
+    with:
+      nspect_id: ${{ vars.NSPECT_ID }}
+    # Optional overrides — see the workflow file for the full interface:
+    #   runs-on: linux-amd64-cpu4       # nv-gha-runners label
+    #   failure_policy: malicious-only  # warn on SUSPICIOUS (default: strict — block it)
+    #   upload_report: true
+    #   timeout_minutes: 90             # job timeout; report polling is derived from it
 ```
 
 ### SAST — [`sast-scan-codeql.yml`](sast-scan-codeql.yml)

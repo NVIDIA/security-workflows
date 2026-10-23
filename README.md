@@ -54,6 +54,8 @@ The CI surface is `vuln-scan-pulse-oss`, which runs NVIDIA's Pulse OSS scanner o
 
 Inspects committed and incoming files for malicious binaries, packers, droppers, and known indicators of compromise. Targeted at repositories that ingest binaries, models, or other non-source artifacts.
 
+The CI surface is `malware-scan-pulse`, which asks NVIDIA's Pulse Malware Service to scan the run's commit with ReversingLabs. Nothing is checked out: the service fetches the commit itself, and the target is always the run's own repository and commit, so a caller cannot redirect the scan. It runs on `nv-gha-runners` with its scanner image pinned by digest inside the workflow, reaches the service over the production Charon tunnel on loopback, and presents GitHub OIDC to it as its only identity. A MALICIOUS verdict always blocks, SUSPICIOUS blocks by default, and a scan that ends without a verdict never passes. It gates merges only where the repository's Charon tenant lists the copy-pr-bot mirror refs, and is otherwise a post-merge and scheduled gate; the [workflow catalogue](.github/workflows/README.md#malware-scan--malware-scan-pulseyml) covers that and the other Charon requirements, along with the interface.
+
 ### Static Application Security Testing (SAST)
 
 Performs static code analysis to surface security defects in first-party source code (e.g. injection, unsafe deserialization, weak cryptographic primitives).
