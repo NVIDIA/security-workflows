@@ -114,6 +114,47 @@ jobs:
           pre-commit try-repo . secret-scan-trufflehog --files lob_false_positive_fixture.py
           rm -f lob_false_positive_fixture.py
 
+      # GitHub-hosted runners have neither the NVIDIA-internal client nor a route to the service, like an external contributor.
+      # The GuardWords hook must skip there, and fail only when the caller opts in.
+      - name: Regression — GuardWords hook skips when the internal service is unavailable
+        shell: bash
+        run: |
+          python -m pip install ./hooks/guardwords
+          expect() {
+            local want=$1 got=0
+            shift
+            "$@" || got=$?
+            if [ "$got" -ne "$want" ]; then
+              echo "::error::'$*' exited $got, expected $want"
+              exit 1
+            fi
+          }
+          # No client installed.
+          expect 0 guardwords-scan-code-scanning
+          expect 1 guardwords-scan-code-scanning --on-unavailable=fail
+          # Client configured but the endpoint refuses connections, so the client is never launched.
+          stand_in_client=$(python -c 'import sys; print(sys.executable)')
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0=code-scanning.client GIT_CONFIG_VALUE_0="$stand_in_client"
+          export GIT_CONFIG_KEY_1=code-scanning.endpoint GIT_CONFIG_VALUE_1=127.0.0.1:9
+          expect 0 guardwords-scan-code-scanning
+          expect 1 guardwords-scan-code-scanning --on-unavailable=fail
+
+      # The setup script for NVIDIA machines must fail with a message, not a traceback, where GitLab cannot be reached.
+      - name: Regression — GuardWords client setup fails cleanly without GitLab access
+        shell: bash
+        env:
+          PYTHONWARNINGS: error
+        run: |
+          python hooks/guardwords/install_client.py --help > /dev/null
+          status=0
+          output=$(python hooks/guardwords/install_client.py --project-url https://gitlab.invalid/group/client --endpoint scan.invalid:443 2>&1) || status=$?
+          echo "$output"
+          if [ "$status" -ne 1 ] || grep -q Traceback <<<"$output"; then
+            echo "::error::install_client.py exited $status; expected a clean failure with exit status 1"
+            exit 1
+          fi
+
   # ============================================================================
   # failure_policy: strict (strictest) — must fail on ANY finding
   # ============================================================================

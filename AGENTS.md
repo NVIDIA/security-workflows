@@ -9,9 +9,9 @@ Guidelines for agents (and humans) working in the NVIDIA Security Workflows repo
 This repository publishes the security-compliance machinery that downstream NVIDIA repositories consume across six scan categories — Secret, License, Vulnerability, Malware, SAST, GuardWords. It exposes **two surfaces**:
 
 - **Reusable GitHub Actions workflows** under `.github/workflows/` — job-level server-side enforcement via [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows). Each workflow declares its own `permissions:` block and runs in an isolated job. This is the CI enforcement surface for security gates per guardrail #4 (least-privilege).
-- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and downloads the pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment; consumers need no system scanner or shell installer.
+- **Pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — local-advisory checks consumed by downstream `.pre-commit-config.yaml` files. `secret-scan-trufflehog` uses `language: python` and downloads the pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment; consumers need no system scanner or shell installer. `guardwords-scan-code-scanning` is a standard-library Python wrapper around NVIDIA's internal code-scanning client; it skips wherever the client or service is unavailable, so the same configuration works for external contributors. NVIDIA machines get the client and endpoint from `hooks/guardwords/install_client.py`, which takes the internal GitLab project and endpoint as arguments so the repository names no internal host.
 
-Consumer repositories reference the CI workflow by 40-character commit SHA and pre-commit hooks by release tag — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
+Consumer repositories reference the CI workflow and pre-commit hooks by 40-character commit SHA (pre-commit pins carry the release tag in a `# frozen:` comment) — see [`README.md` → Pin policy per surface](README.md#pin-policy-per-surface). Changes here have **org-wide reach**.
 
 The repository is currently in early scaffold (`v0.1.0` pre-release). The first scan — Secret scanning — ships two lanes: the CI enforcement workflow [`.github/workflows/secret-scan-pulse.yml`](.github/workflows/secret-scan-pulse.yml) (NVIDIA-licensed Pulse Secret Scanner, run on `nv-gha-runners`), and the local-advisory pre-commit hook [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) (open-source `trufflesecurity/trufflehog`, installed into pre-commit's isolated environment). Pulse is container-only, so it is CI-only; the pre-commit lane deliberately uses the OSS CLI to stay within the <10s DX budget on developer machines.
 
@@ -22,6 +22,7 @@ The repository is currently in early scaffold (`v0.1.0` pre-release). The first 
 Before any non-trivial change, read:
 
 - [`README.md`](README.md) — repository scope, the `workflow_call` contract, versioning policy
+- [`.github/workflows/README.md`](.github/workflows/README.md) and [`hooks/README.md`](hooks/README.md) — the workflow and hook catalogues; scan- and hook-specific documentation belongs there, not in the top-level README
 - [`GOVERNANCE.md`](GOVERNANCE.md) — what changes require ProdSec sign-off vs routine maintainer review
 - [`ROADMAP.md`](ROADMAP.md) — current status of each scan category
 - [`CHANGELOG.md`](CHANGELOG.md) — record your change under `[Unreleased]`
@@ -32,13 +33,13 @@ Before any non-trivial change, read:
 
 ## Workflow Development Guardrails
 
-Everything published from this repository — `workflow_call` workflows and `.pre-commit-hooks.yaml` hooks — has org-wide reach through pinned references in downstream repositories (SHA for the CI workflow, release tag for pre-commit). These constraints keep that blast radius contained.
+Everything published from this repository — `workflow_call` workflows and `.pre-commit-hooks.yaml` hooks — has org-wide reach through pinned references in downstream repositories (commit SHA on both surfaces). These constraints keep that blast radius contained.
 
 1. **`workflow_call` interfaces and `.pre-commit-hooks.yaml` hook ids are public contracts.** Renaming or removing a workflow input, renaming or removing a hook id, changing hook arguments, or changing a default that affects security posture is a **major** version bump per [`README.md`](README.md#versioning).
 2. **Default to fail-closed.** A scan finding blocks the consumer's merge (workflows) or commit (pre-commit hooks). Fail-open behavior must be an explicit, opt-in input — never the default.
 3. **Pin every external reference per surface** — full table in [`README.md`](README.md#pin-policy-per-surface):
    - `uses:` in a workflow → **40-character commit SHA**
-   - `rev:` in a consumer's `.pre-commit-config.yaml` → **release tag** (e.g. `v0.1.0`)
+   - `rev:` in a consumer's `.pre-commit-config.yaml` → **40-character commit SHA** with the release tag as a comment (`rev: <commit SHA>  # frozen: v0.4.0`, as written by `pre-commit autoupdate --freeze`)
 
    Branch references (`@main`, `@latest`) are never acceptable.
 4. **Least-privilege `permissions:`.** Default the workflow root to read-only; escalate per-job only where required (e.g. `security-events: write` for SARIF upload).
@@ -53,7 +54,7 @@ Changes that fall outside these guardrails require ProdSec acknowledgment per [`
 
 ## Validating Changes
 
-This repository contains no application code; validation is YAML- and Actions-focused.
+This repository contains no application code beyond thin pre-commit hook wrappers and the GuardWords client setup script; validation is YAML- and Actions-focused.
 
 ```bash
 # Syntactic YAML check across all tracked YAML files
@@ -81,7 +82,7 @@ coverage for a hook limited to another stage.
 
 ## Out of Scope
 
-- Application source code or libraries — this is a workflow-only repository, apart from the minimal packaging metadata needed for pre-commit hook installation.
+- Application source code or libraries — this is a workflow-only repository, apart from the minimal packaging metadata, thin wrappers, and setup script needed for pre-commit hooks.
 - Per-repository configuration for downstream consumers — lives in each consumer repo, not here.
 
 ---

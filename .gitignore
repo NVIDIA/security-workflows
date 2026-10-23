@@ -30,3 +30,8 @@ Thumbs.db
 /hooks/trufflehog/dist/
 /hooks/trufflehog/*.egg-info/
 /nvidia_security_workflows_pre_commit_bridge.egg-info/
+
+# GuardWords hook-package build artifacts.
+/hooks/guardwords/build/
+/hooks/guardwords/*.egg-info/
+__pycache__/
