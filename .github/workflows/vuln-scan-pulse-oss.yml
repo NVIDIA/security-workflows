@@ -111,6 +111,9 @@ on:
       scanner_exit_code:
         description: Scanner process exit code.
         value: ${{ jobs.pulse-oss.outputs.scanner_exit_code }}
+      scanner_image_digest:
+        description: Digest of the scanner image the run executed.
+        value: ${{ jobs.pulse-oss.outputs.scanner_image_digest }}
 
 permissions:
   contents: read
@@ -127,13 +130,16 @@ jobs:
       resolved_mode: ${{ steps.contract.outputs.resolved_mode }}
       finding_count: ${{ steps.report.outputs.finding_count }}
       scanner_exit_code: ${{ steps.scanner.outputs.exit_code }}
+      scanner_image_digest: ${{ steps.image.outputs.digest }}
     env:
-      SCANNER_IMAGE_REF: ${{ vars.VULN_SCAN_PULSE_OSS_IMAGE }}:${{ vars.VULN_SCAN_PULSE_OSS_IMAGE_TAG }}
+      # Approved stable release (charon-stable as of 2026-10-23). Pinned by digest because the
+      # scanner receives the job's OIDC request credentials; callers cannot substitute it.
+      SCANNER_IMAGE_REF: nvcr.io/0898940053369630/pulse/pulse-oss-cli@sha256:f84e3a9b2e31de061e8ab697456e64c1428777db2fae307fc3afb57d31ef9aff
       SCANNER_IMAGE_ALLOWED_REGISTRY: nvcr.io
-      CHARON_PROXY_SERVER: ${{ vars.CHARON_PROXY_SERVER }}
-      CHARON_JOIN_TOKEN: ${{ vars.CHARON_JOIN_TOKEN }}
-      CHARON_APP_NAME: ${{ vars.CHARON_APP_NAME }}
-      CHARON_LOCAL_PORT: ${{ vars.CHARON_LOCAL_PORT }}
+      CHARON_PROXY_SERVER: ext-nv-prd-apps.teleport.sh:443
+      CHARON_JOIN_TOKEN: charon-gha-runners
+      CHARON_APP_NAME: charon
+      CHARON_LOCAL_PORT: "8888"
       CHARON_CLIENT_VERSION: ${{ vars.VULN_SCAN_TUNNEL_CLIENT_VERSION || 'auto' }}
     steps:
       - name: Validate scan contract
@@ -172,26 +178,16 @@ jobs:
             NVCR_VAULT_NAMESPACE NVCR_VAULT_SECRET_PATH; do
             [[ -n "${!name:-}" ]] || missing+=("$name")
           done
-          for spec in \
-            CHARON_PROXY_SERVER:CHARON_PROXY_SERVER \
-            CHARON_JOIN_TOKEN:CHARON_JOIN_TOKEN \
-            CHARON_APP_NAME:CHARON_APP_NAME \
-            CHARON_LOCAL_PORT:CHARON_LOCAL_PORT; do
-            variable_name="${spec%%:*}"
-            env_name="${spec#*:}"
-            [[ -n "${!env_name:-}" ]] || missing+=("$variable_name")
-          done
           if (( ${#missing[@]} > 0 )); then
             echo "::error::Missing Actions variable(s): ${missing[*]}. They must be visible to the calling repository — ask the GitHub-First platform team to provision them for this organization."
             exit 1
           fi
 
           # The quotes matter: a quoted subexpression is literal, so the '.' in the host is a
-          # dot rather than "any character" and nvcrXio is not a match. The path and tag
-          # character classes exclude '@' and ':', so neither can smuggle a second reference.
-          # Catches an unset image variable too: either half missing fails this match.
-          if [[ ! "$SCANNER_IMAGE_REF" =~ ^"$SCANNER_IMAGE_ALLOWED_REGISTRY"/[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The scanner image must be hosted on ${SCANNER_IMAGE_ALLOWED_REGISTRY} and carry a valid tag. Check VULN_SCAN_PULSE_OSS_IMAGE and VULN_SCAN_PULSE_OSS_IMAGE_TAG."
+          # dot rather than "any character" and nvcrXio is not a match. The path class excludes
+          # '@' and ':', so a tag cannot ride along with the digest.
+          if [[ ! "$SCANNER_IMAGE_REF" =~ ^"$SCANNER_IMAGE_ALLOWED_REGISTRY"/[A-Za-z0-9][A-Za-z0-9._/-]*@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The scanner image must be an ${SCANNER_IMAGE_ALLOWED_REGISTRY} reference pinned by sha256 digest."
             exit 1
           fi
           # The value reaches teleport-actions/setup, which builds a download URL from it.
@@ -203,6 +199,7 @@ jobs:
             echo "::error::VULN_SCAN_TUNNEL_CLIENT_VERSION must be a bare semantic version, or unset to resolve it from the proxy."
             exit 1
           fi
+          # Workflow-owned, but these feed the tbot config and loopback URLs, so their shape is checked.
           if [[ ! "$CHARON_PROXY_SERVER" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$ ]]; then
             echo "::error::CHARON_PROXY_SERVER must be a host:port value."
             exit 1
@@ -442,7 +439,18 @@ jobs:
           logout: false
 
       - name: Pull Pulse OSS scanner image
-        run: docker pull "$SCANNER_IMAGE_REF" >/dev/null
+        id: image
+        run: |
+          set -euo pipefail
+          docker pull "$SCANNER_IMAGE_REF" >/dev/null
+          # Record the digest from the pulled image itself, not only from the reference.
+          digest="${SCANNER_IMAGE_REF##*@}"
+          repo_digests="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$SCANNER_IMAGE_REF")"
+          if ! grep -qxF "${SCANNER_IMAGE_REF%@*}@${digest}" <<< "$repo_digests"; then
+            echo "::error::The pulled scanner image does not carry the pinned digest ${digest}."
+            exit 1
+          fi
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
 
       - name: Log out of nvcr.io
         if: always()
@@ -972,12 +980,14 @@ jobs:
           REPORT_STATUS: ${{ steps.report.outcome }}
           DIAGNOSTIC_CATEGORY: ${{ steps.classify.outputs.diagnostic_category || 'none' }}
           SCANNER_EXIT: ${{ steps.scanner.outputs.exit_code || 'unavailable' }}
+          SCANNER_DIGEST: ${{ steps.image.outputs.digest || 'unavailable' }}
         run: |
           {
             echo "## Vulnerability scan (Pulse OSS)"
             echo
             echo "| Check | Result |"
             echo "| --- | --- |"
+            echo "| Scanner image digest | \`$SCANNER_DIGEST\` |"
             echo "| Resolved mode | $RESOLVED_MODE |"
             echo "| Scan path | $SCAN_PATH |"
             echo "| Build mode | $BUILD_MODE |"

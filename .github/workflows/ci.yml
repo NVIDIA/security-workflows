@@ -463,7 +463,7 @@ jobs:
           set -euo pipefail
           pip install --quiet pyyaml
           python - <<'PY'
-          import os, pathlib, re, yaml
+          import os, pathlib, re, shlex, yaml
           workflow = yaml.safe_load(pathlib.Path(".github/workflows/vuln-scan-pulse-oss.yml").read_text())
           job = workflow["jobs"]["pulse-oss"]
           steps = {step["name"]: step for step in job["steps"]}
@@ -485,13 +485,31 @@ jobs:
                   end = script.index("\nPY", start)
                   script = script[start:end]
               (temp / filename).write_text(script)
-          # Source the allowed image prefix from the workflow so the test cannot drift from it.
-          (temp / "job-env.sh").write_text(
-              "ALLOWED_REGISTRY=%s\n" % job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"])
+          # Source the workflow-owned settings so the tests cannot drift from them.
+          (temp / "job-env.sh").write_text("".join(
+              "%s=%s\n" % (name, shlex.quote(str(job["env"][key]))) for name, key in (
+                  ("ALLOWED_REGISTRY", "SCANNER_IMAGE_ALLOWED_REGISTRY"),
+                  ("PINNED_IMAGE", "SCANNER_IMAGE_REF"),
+                  ("DEFAULT_CHARON_PROXY", "CHARON_PROXY_SERVER"),
+                  ("DEFAULT_CHARON_JOIN", "CHARON_JOIN_TOKEN"),
+                  ("DEFAULT_CHARON_APP", "CHARON_APP_NAME"),
+                  ("DEFAULT_CHARON_PORT", "CHARON_LOCAL_PORT"),
+              )))
           PY
           for f in contract.sh scan-path.sh log-sanitizer.py classify.sh report.sh enforce.sh job-env.sh; do
             test -s "$RUNNER_TEMP/$f"
           done
+
+      - name: Assert the scanner image and tunnel settings belong to the workflow
+        run: |
+          set -euo pipefail
+          # The scanner receives the job's OIDC request credentials, so callers must not be able
+          # to replace the image or redirect the tunnel through their own variables.
+          if grep -nE 'vars\.(VULN_SCAN_PULSE_OSS_IMAGE|CHARON_)' .github/workflows/vuln-scan-pulse-oss.yml; then
+            echo "::error::vuln-scan-pulse-oss.yml reads the scanner image or Charon settings from caller variables"
+            exit 1
+          fi
+          echo "✓ the scanner image and Charon settings are owned by the workflow"
 
       - name: Assert the scan contract accepts and rejects the right inputs
         env:
@@ -501,10 +519,10 @@ jobs:
           # shellcheck disable=SC1091
           . "$RUNNER_TEMP/job-env.sh"
           failures=0
-          # A placeholder namespace, not the real one: the guard constrains only the host,
-          # and the internal path is deliberately absent from this public repository.
+          # A placeholder image keeps these cases independent of the pinned release.
           IMAGE_PATH="${ALLOWED_REGISTRY}/0000000000000000/pulse/pulse-oss-cli"
-          GOOD_IMAGE="${IMAGE_PATH}:charon-stable"
+          DIGEST="$(printf 'a%.0s' $(seq 64))"
+          GOOD_IMAGE="${IMAGE_PATH}@sha256:${DIGEST}"
 
           # Every case starts from a valid contract and overrides exactly what it tests, so a
           # rejection can only be caused by the field under test.
@@ -513,10 +531,8 @@ jobs:
             IMAGE_REF="$GOOD_IMAGE"; CLIENT_VERSION=auto
             OIDC_URL=https://oidc.example.invalid/token; OIDC_TOKEN=placeholder-not-a-real-token
             VAULT_URL=https://vault.example.invalid
-            CHARON_PROXY=proxy.example.invalid:443
-            CHARON_JOIN=charon-test-token
-            CHARON_APP=charon-test-app
-            CHARON_PORT=8888
+            CHARON_PROXY="$DEFAULT_CHARON_PROXY"; CHARON_JOIN="$DEFAULT_CHARON_JOIN"
+            CHARON_APP="$DEFAULT_CHARON_APP"; CHARON_PORT="$DEFAULT_CHARON_PORT"
             NSPECT_ID=NSPECT-ABCD-1234; REGISTERED_BRANCH=main; SBOM_NAME=
             SCAN_MODE=rapid; SCAN_PATH=.; FAILURE_POLICY=report-only
             WRITEBACK=false; TIMEOUT=1800
@@ -610,8 +626,10 @@ jobs:
           # surface as the Vault action's "Input required and not supplied: url".
           reset_case; VAULT_URL=
           expect_rejected "a missing Vault variable is named" "NV_VAULT_URL"
+
+          # Workflow-owned tunnel settings are still shape-checked before they reach the tbot config.
           reset_case; CHARON_PROXY=
-          expect_rejected "a missing Charon proxy variable is named" "CHARON_PROXY_SERVER"
+          expect_rejected "an empty Charon proxy is rejected" "host:port"
           reset_case; CHARON_PROXY=proxy.example.invalid:99999
           expect_rejected "a Charon proxy port above the TCP range is rejected" "port from 1 to 65535"
           reset_case; CHARON_PROXY=proxy.example.invalid/path:443
@@ -625,27 +643,22 @@ jobs:
           reset_case; CHARON_PORT=not-a-port
           expect_rejected "a non-numeric Charon local port is rejected" "unprivileged TCP port"
 
-          # The scanner image is caller-supplied through vars; only a digest pin under the
-          # allowed prefix may run. The tag itself is mutable by design (see the job env),
-          # so these cover redirection and tag grammar, not immutability.
-          reset_case; IMAGE_REF="${IMAGE_PATH}:1.2.0-alpha6"
-          expect_ok       "an alternative valid tag is accepted"
-          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-oss-cli:charon-stable"
-          expect_rejected "a foreign registry is rejected"        "hosted on"
+          # The scanner image is pinned by digest in the workflow; no tag or other registry passes.
+          reset_case; IMAGE_REF="$PINNED_IMAGE"
+          expect_ok       "the workflow's pinned scanner image is accepted"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:charon-stable"
+          expect_rejected "a tag reference is rejected"            "pinned by sha256 digest"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:latest@sha256:${DIGEST}"
+          expect_rejected "a tag alongside the digest is rejected" "pinned by sha256 digest"
+          reset_case; IMAGE_REF="${IMAGE_PATH}@sha256:${DIGEST:0:12}"
+          expect_rejected "a truncated digest is rejected"         "pinned by sha256 digest"
+          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-oss-cli@sha256:${DIGEST}"
+          expect_rejected "a foreign registry is rejected"         "pinned by sha256 digest"
           # Anchoring and literal-dot: neither a host in front nor a lookalike matches.
-          reset_case; IMAGE_REF="registry.invalid/${IMAGE_PATH}:charon-stable"
-          expect_rejected "the allowed host behind another host is rejected" "hosted on"
-          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-oss-cli:charon-stable"
-          expect_rejected "a lookalike host is rejected"          "hosted on"
-          reset_case; IMAGE_REF=":charon-stable"
-          expect_rejected "an unset image variable is rejected"   "VULN_SCAN_PULSE_OSS_IMAGE"
-          reset_case; IMAGE_REF="${IMAGE_PATH}:"
-          expect_rejected "an unset tag variable is rejected"     "VULN_SCAN_PULSE_OSS_IMAGE_TAG"
-          # A tag cannot carry a second reference past the prefix check.
-          reset_case; IMAGE_REF="${IMAGE_PATH}:latest@sha256:$(printf 'a%.0s' $(seq 64))"
-          expect_rejected "a tag smuggling a digest is rejected"  "carry a valid tag"
-          reset_case; IMAGE_REF="${IMAGE_PATH}:.hidden"
-          expect_rejected "a tag starting with a dot is rejected" "carry a valid tag"
+          reset_case; IMAGE_REF="registry.invalid/${IMAGE_PATH}@sha256:${DIGEST}"
+          expect_rejected "the allowed host behind another host is rejected" "pinned by sha256 digest"
+          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-oss-cli@sha256:${DIGEST}"
+          expect_rejected "a lookalike host is rejected"           "pinned by sha256 digest"
 
           reset_case; CLIENT_VERSION=latest
           expect_rejected "a non-semver tunnel client version is rejected" "bare semantic version"
@@ -1332,9 +1345,9 @@ jobs:
   #
   # Ungated on purpose: these run on every push, so a regression in the scan surfaces here
   # rather than behind a variable somebody has to remember to flip. That makes the scan's
-  # prerequisites hard requirements for this repository, not optional extras —
-  # VULN_SCAN_PULSE_OSS_IMAGE must be visible and hold the repository of the digest the
-  # workflow pins, and the triggering ref must appear in this repository's Charon tenant
+  # prerequisites hard requirements for this repository, not optional extras — the Vault
+  # variables must be visible, the pinned scanner image must be pullable with the credentials
+  # they issue, and the triggering ref must appear in this repository's Charon tenant
   # allowed_refs. Charon authorizes per ref, and a ref it does not list is refused as an
   # nSpect HTTP 403, so CI covers only the refs the tenant lists: pushes to main and the
   # copy-pr-bot refs/heads/pull-request/* mirrors.
@@ -1386,10 +1399,16 @@ jobs:
         env:
           POSITIVE_MODE: ${{ needs.vuln-scan-pulse-oss-positive.outputs.resolved_mode }}
           POSITIVE_EXIT: ${{ needs.vuln-scan-pulse-oss-positive.outputs.scanner_exit_code }}
+          POSITIVE_DIGEST: ${{ needs.vuln-scan-pulse-oss-positive.outputs.scanner_image_digest }}
           DETECTION_COUNT: ${{ needs.vuln-scan-pulse-oss-detection.outputs.finding_count }}
+          DETECTION_DIGEST: ${{ needs.vuln-scan-pulse-oss-detection.outputs.scanner_image_digest }}
         run: |
           set -euo pipefail
           failures=0
+          if ! [[ "$POSITIVE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || [ "$POSITIVE_DIGEST" != "$DETECTION_DIGEST" ]; then
+            echo "::error::The scans did not record the pinned scanner digest (positive '${POSITIVE_DIGEST}', detection '${DETECTION_DIGEST}')."
+            failures=$((failures + 1))
+          fi
           if [ "$POSITIVE_MODE" != rapid ]; then
             echo "::error::The positive scan resolved to '${POSITIVE_MODE}', not rapid. A self-test must not create backend state."
             failures=$((failures + 1))
@@ -1403,7 +1422,7 @@ jobs:
             failures=$((failures + 1))
           fi
           [ "$failures" -eq 0 ] || exit 1
-          echo "::notice::Transport proven (positive scan completed) and detection proven (${DETECTION_COUNT} finding(s) from the controlled fixture)."
+          echo "::notice::Transport proven (positive scan completed) and detection proven (${DETECTION_COUNT} finding(s) from the controlled fixture) with scanner ${POSITIVE_DIGEST}."
 
   # Suite passthrough for the vulnerability scan. Separate from security-suite-dogfood, which
   # stays behind ENABLE_PULSE_INTEGRATION for the secret scan.
