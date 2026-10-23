@@ -1480,7 +1480,7 @@ jobs:
           set -euo pipefail
           pip install --quiet pyyaml
           python - <<'PY'
-          import os, pathlib, re, yaml
+          import os, pathlib, re, shlex, yaml
           workflow = yaml.safe_load(pathlib.Path(".github/workflows/malware-scan-pulse.yml").read_text())
           job = workflow["jobs"]["pulse-malware"]
           steps = {step["name"]: step for step in job["steps"]}
@@ -1493,29 +1493,39 @@ jobs:
           }.items():
               # A renamed step raises KeyError rather than leaving its gate untested.
               (temp / filename).write_text(steps[step_name]["run"])
-          # The digest must be a literal here: a caller's variable may choose the repository,
-          # never what runs. Actions expands expression syntax anywhere in run:, so these
-          # patterns and messages never spell it out unescaped.
-          pinned = re.fullmatch(r"\$\{\{ vars\.MALWARE_SCAN_PULSE_IMAGE \}\}@(sha256:[0-9a-f]{64})",
-                                job["env"]["SCANNER_IMAGE_REF"])
-          if not pinned:
-              raise SystemExit("SCANNER_IMAGE_REF must be the MALWARE_SCAN_PULSE_IMAGE variable "
-                               "followed by @sha256:<digest>, with the digest written in the workflow.")
           # The polling schedule is derived from timeout_minutes, so the job timeout must be too.
+          # Actions expands expression syntax anywhere in run:, so the pattern never spells it
+          # out unescaped.
           if not re.fullmatch(r"\$\{\{ inputs\.timeout_minutes \}\}", str(job["timeout-minutes"])):
               raise SystemExit("timeout-minutes must be the timeout_minutes input.")
-          # Read the values under test from the workflow rather than duplicating them.
-          (temp / "job-env.sh").write_text("".join("%s=%s\n" % pair for pair in (
-              ("ALLOWED_REGISTRY", job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"]),
-              ("PINNED_DIGEST", pinned.group(1)),
-              ("SCAN_BACKOFF_SEC", job["env"]["SCAN_BACKOFF_SEC"]),
-              ("SCAN_MAX_POLL_WAIT_SEC", job["env"]["SCAN_MAX_POLL_WAIT_SEC"]),
-              ("SCAN_TIMEOUT_MARGIN_SEC", job["env"]["SCAN_TIMEOUT_MARGIN_SEC"]),
-          )))
+          # Source the workflow-owned settings so the tests cannot drift from them.
+          (temp / "job-env.sh").write_text("".join(
+              "%s=%s\n" % (name, shlex.quote(str(job["env"][key]))) for name, key in (
+                  ("ALLOWED_REGISTRY", "SCANNER_IMAGE_ALLOWED_REGISTRY"),
+                  ("PINNED_IMAGE", "SCANNER_IMAGE_REF"),
+                  ("DEFAULT_CHARON_PROXY", "CHARON_PROXY_SERVER"),
+                  ("DEFAULT_CHARON_JOIN", "CHARON_JOIN_TOKEN"),
+                  ("DEFAULT_CHARON_APP", "CHARON_APP_NAME"),
+                  ("DEFAULT_CHARON_PORT", "CHARON_LOCAL_PORT"),
+                  ("SCAN_BACKOFF_SEC", "SCAN_BACKOFF_SEC"),
+                  ("SCAN_MAX_POLL_WAIT_SEC", "SCAN_MAX_POLL_WAIT_SEC"),
+                  ("SCAN_TIMEOUT_MARGIN_SEC", "SCAN_TIMEOUT_MARGIN_SEC"),
+              )))
           PY
           for f in contract.sh classify.sh report.sh enforce.sh job-env.sh; do
             test -s "$RUNNER_TEMP/$f"
           done
+
+      - name: Assert the scanner image and tunnel settings belong to the workflow
+        run: |
+          set -euo pipefail
+          # The scanner receives the job's OIDC request credentials, so callers must not be able
+          # to replace the image or redirect the tunnel through their own variables.
+          if grep -nE 'vars\.(MALWARE_SCAN_PULSE_IMAGE|CHARON_)' .github/workflows/malware-scan-pulse.yml; then
+            echo "::error::malware-scan-pulse.yml reads the scanner image or Charon settings from caller variables"
+            exit 1
+          fi
+          echo "✓ the scanner image and Charon settings are owned by the workflow"
 
       - name: Assert the scan contract accepts and rejects the right inputs
         env:
@@ -1525,11 +1535,10 @@ jobs:
           # shellcheck disable=SC1091
           . "$RUNNER_TEMP/job-env.sh"
           failures=0
-          # Placeholder namespace: the guard checks the registry host and the repository name,
-          # and the internal path is kept out of this public repository. IMAGE_REF is composed
-          # the way the workflow composes it: the variable, then the pinned digest.
+          # A placeholder image keeps these cases independent of the pinned release.
           IMAGE_PATH="${ALLOWED_REGISTRY}/0000000000000000/pulse/pulse-malware-scanner-cli"
-          GOOD_IMAGE="${IMAGE_PATH}@${PINNED_DIGEST}"
+          DIGEST="$(printf 'a%.0s' $(seq 64))"
+          GOOD_IMAGE="${IMAGE_PATH}@sha256:${DIGEST}"
           GOOD_SHA=0123456789abcdef0123456789abcdef01234567
 
           # Each case starts from a valid contract and overrides only the field under test.
@@ -1538,8 +1547,8 @@ jobs:
             IMAGE_REF="$GOOD_IMAGE"; CLIENT_VERSION=auto
             OIDC_URL=https://oidc.example.invalid/token; OIDC_TOKEN=placeholder-not-a-real-token
             VAULT_URL=https://vault.example.invalid
-            CHARON_PROXY=proxy.example.invalid:443
-            CHARON_JOIN=charon-test-token; CHARON_APP=charon-test-app; CHARON_PORT=8888
+            CHARON_PROXY="$DEFAULT_CHARON_PROXY"; CHARON_JOIN="$DEFAULT_CHARON_JOIN"
+            CHARON_APP="$DEFAULT_CHARON_APP"; CHARON_PORT="$DEFAULT_CHARON_PORT"
             NSPECT_ID=NSPECT-ABCD-1234; FAILURE_POLICY=strict; TIMEOUT_MINUTES=60
           }
 
@@ -1648,39 +1657,35 @@ jobs:
           reset_case; EVENT=pull_request_target
           expect_rejected "pull_request_target is refused" "not a trusted trigger"
 
-          # A missing variable is named before the Vault action or the tunnel fails on it.
+          # A missing variable is named before the Vault action fails on it.
           reset_case; VAULT_URL=
           expect_rejected "a missing Vault variable is named" "NV_VAULT_URL"
-          reset_case; CHARON_PROXY=
-          expect_rejected "a missing Charon proxy variable is named" \
-            "Missing Actions variable(s): CHARON_PROXY_SERVER."
 
-          image_error="MALWARE_SCAN_PULSE_IMAGE must be the"
-          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-malware-scanner-cli@${PINNED_DIGEST}"
-          expect_rejected "a foreign registry is rejected"        "$image_error"
-          # The registry match is anchored and its dot is literal.
-          reset_case; IMAGE_REF="registry.invalid/${GOOD_IMAGE}"
-          expect_rejected "the allowed host behind another host is rejected" "$image_error"
-          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-malware-scanner-cli@${PINNED_DIGEST}"
-          expect_rejected "a lookalike host is rejected"          "$image_error"
-          reset_case; IMAGE_REF="@${PINNED_DIGEST}"
-          expect_rejected "an unset image variable is rejected"   "$image_error"
-          # The variable names a repository only; what runs is the workflow's digest.
-          reset_case; IMAGE_REF="${IMAGE_PATH}:1.3.0@${PINNED_DIGEST}"
-          expect_rejected "an image variable carrying a tag is rejected"    "$image_error"
-          reset_case; IMAGE_REF="${IMAGE_PATH}@sha256:${GOOD_SHA}${GOOD_SHA:0:24}@${PINNED_DIGEST}"
-          expect_rejected "an image variable carrying a digest is rejected" "$image_error"
-          reset_case; IMAGE_REF="${ALLOWED_REGISTRY}/0000000000000000/pulse/other-scanner@${PINNED_DIGEST}"
-          expect_rejected "another repository is rejected"        "$image_error"
-          reset_case; IMAGE_REF="${ALLOWED_REGISTRY}/0000000000000000/pulse/fork-pulse-malware-scanner-cli@${PINNED_DIGEST}"
-          expect_rejected "a repository name that only ends in the scanner's is rejected" "$image_error"
+          # The scanner image is pinned by digest in the workflow; no tag or other registry passes.
+          reset_case; IMAGE_REF="$PINNED_IMAGE"
+          expect_ok       "the workflow's pinned scanner image is accepted"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:1.3.0"
+          expect_rejected "a tag reference is rejected"            "pinned by sha256 digest"
+          reset_case; IMAGE_REF="${IMAGE_PATH}:latest@sha256:${DIGEST}"
+          expect_rejected "a tag alongside the digest is rejected" "pinned by sha256 digest"
+          reset_case; IMAGE_REF="${IMAGE_PATH}@sha256:${DIGEST:0:12}"
+          expect_rejected "a truncated digest is rejected"         "pinned by sha256 digest"
+          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-malware-scanner-cli@sha256:${DIGEST}"
+          expect_rejected "a foreign registry is rejected"         "pinned by sha256 digest"
+          # Anchoring and literal-dot: neither a host in front nor a lookalike matches.
+          reset_case; IMAGE_REF="registry.invalid/${IMAGE_PATH}@sha256:${DIGEST}"
+          expect_rejected "the allowed host behind another host is rejected" "pinned by sha256 digest"
+          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-malware-scanner-cli@sha256:${DIGEST}"
+          expect_rejected "a lookalike host is rejected"           "pinned by sha256 digest"
 
           reset_case; CLIENT_VERSION=latest
           expect_rejected "a non-semver tunnel client version is rejected" "bare semantic version"
           reset_case; CLIENT_VERSION=1.2.3-..%2Fevil
           expect_rejected "a traversal in the client version is rejected"  "bare semantic version"
 
-          # Charon values are interpolated into tbot's YAML config and must match their shapes.
+          # Workflow-owned tunnel settings are still shape-checked before they reach the tbot config.
+          reset_case; CHARON_PROXY=
+          expect_rejected "an empty Charon proxy is rejected" "host:port"
           reset_case; CHARON_PROXY=proxy.example.invalid:99999
           expect_rejected "a Charon proxy port above the TCP range is rejected" "port from 1 to 65535"
           reset_case; CHARON_PROXY=proxy.example.invalid/path:443
@@ -2199,8 +2204,8 @@ jobs:
   # Malware scan (Pulse) — live integration.
   #
   # Gated on ENABLE_PULSE_INTEGRATION, shared with the secret-scan live jobs. Requires
-  # NSPECT_ID, the MALWARE_SCAN_PULSE_IMAGE repository path, the CHARON_* variables, and a
-  # Charon tenant that lists the triggering ref and the scan's routes.
+  # NSPECT_ID, the Vault variables, a pinned scanner image pullable with the credentials they
+  # issue, and a Charon tenant that lists the triggering ref and the scan's routes.
   #
   # Proves transport and a CLEAN verdict only. Detection needs a ProdSec-approved sample,
   # which cannot sit on a branch this job expects to scan clean.
@@ -2220,15 +2225,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      - name: Require a CLEAN verdict and the audit join key in the workflow outputs
+      - name: Require a CLEAN verdict, the audit join key, and the scanner digest in the workflow outputs
         env:
           VERDICT: ${{ needs.malware-scan-pulse-positive.outputs.verdict }}
           SCANNER_EXIT: ${{ needs.malware-scan-pulse-positive.outputs.scanner_exit_code }}
           FLAGGED_COUNT: ${{ needs.malware-scan-pulse-positive.outputs.flagged_count }}
           SCAN_ID: ${{ needs.malware-scan-pulse-positive.outputs.scan_id }}
+          SCANNER_DIGEST: ${{ needs.malware-scan-pulse-positive.outputs.scanner_image_digest }}
         run: |
           set -euo pipefail
           failures=0
+          if ! [[ "$SCANNER_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The scan did not record the pinned scanner digest (got '${SCANNER_DIGEST}')."
+            failures=$((failures + 1))
+          fi
           if [ "$VERDICT" != CLEAN ] || [ "$SCANNER_EXIT" != 0 ] || [ "$FLAGGED_COUNT" != 0 ]; then
             echo "::error::Expected verdict CLEAN, scanner exit 0 and no flagged items; got '${VERDICT}', '${SCANNER_EXIT}', '${FLAGGED_COUNT}'."
             failures=$((failures + 1))
@@ -2238,7 +2248,7 @@ jobs:
             failures=$((failures + 1))
           fi
           [ "$failures" -eq 0 ] || exit 1
-          echo "::notice::Transport proven: a CLEAN verdict for this commit reached the caller with Pulse scan ${SCAN_ID}."
+          echo "::notice::Transport proven: a CLEAN verdict for this commit reached the caller with Pulse scan ${SCAN_ID} and scanner ${SCANNER_DIGEST}."
 
   # Suite passthrough for the malware scan, behind the same gate.
   security-suite-malware-dogfood:
