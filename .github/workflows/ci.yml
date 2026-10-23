@@ -1480,7 +1480,7 @@ jobs:
           set -euo pipefail
           pip install --quiet pyyaml
           python - <<'PY'
-          import os, pathlib, yaml
+          import os, pathlib, re, yaml
           workflow = yaml.safe_load(pathlib.Path(".github/workflows/malware-scan-pulse.yml").read_text())
           job = workflow["jobs"]["pulse-malware"]
           steps = {step["name"]: step for step in job["steps"]}
@@ -1493,9 +1493,25 @@ jobs:
           }.items():
               # A renamed step raises KeyError rather than leaving its gate untested.
               (temp / filename).write_text(steps[step_name]["run"])
-          # Read the allowed registry from the workflow rather than duplicating it.
-          (temp / "job-env.sh").write_text(
-              "ALLOWED_REGISTRY=%s\n" % job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"])
+          # The digest must be a literal here: a caller's variable may choose the repository,
+          # never what runs. Actions expands expression syntax anywhere in run:, so these
+          # patterns and messages never spell it out unescaped.
+          pinned = re.fullmatch(r"\$\{\{ vars\.MALWARE_SCAN_PULSE_IMAGE \}\}@(sha256:[0-9a-f]{64})",
+                                job["env"]["SCANNER_IMAGE_REF"])
+          if not pinned:
+              raise SystemExit("SCANNER_IMAGE_REF must be the MALWARE_SCAN_PULSE_IMAGE variable "
+                               "followed by @sha256:<digest>, with the digest written in the workflow.")
+          # The polling schedule is derived from timeout_minutes, so the job timeout must be too.
+          if not re.fullmatch(r"\$\{\{ inputs\.timeout_minutes \}\}", str(job["timeout-minutes"])):
+              raise SystemExit("timeout-minutes must be the timeout_minutes input.")
+          # Read the values under test from the workflow rather than duplicating them.
+          (temp / "job-env.sh").write_text("".join("%s=%s\n" % pair for pair in (
+              ("ALLOWED_REGISTRY", job["env"]["SCANNER_IMAGE_ALLOWED_REGISTRY"]),
+              ("PINNED_DIGEST", pinned.group(1)),
+              ("SCAN_BACKOFF_SEC", job["env"]["SCAN_BACKOFF_SEC"]),
+              ("SCAN_MAX_POLL_WAIT_SEC", job["env"]["SCAN_MAX_POLL_WAIT_SEC"]),
+              ("SCAN_TIMEOUT_MARGIN_SEC", job["env"]["SCAN_TIMEOUT_MARGIN_SEC"]),
+          )))
           PY
           for f in contract.sh classify.sh report.sh enforce.sh job-env.sh; do
             test -s "$RUNNER_TEMP/$f"
@@ -1509,10 +1525,11 @@ jobs:
           # shellcheck disable=SC1091
           . "$RUNNER_TEMP/job-env.sh"
           failures=0
-          # Placeholder namespace: the guard checks only the registry host, and the internal
-          # path is kept out of this public repository.
+          # Placeholder namespace: the guard checks the registry host and the repository name,
+          # and the internal path is kept out of this public repository. IMAGE_REF is composed
+          # the way the workflow composes it: the variable, then the pinned digest.
           IMAGE_PATH="${ALLOWED_REGISTRY}/0000000000000000/pulse/pulse-malware-scanner-cli"
-          GOOD_IMAGE="${IMAGE_PATH}:1.2.0-alpha6"
+          GOOD_IMAGE="${IMAGE_PATH}@${PINNED_DIGEST}"
           GOOD_SHA=0123456789abcdef0123456789abcdef01234567
 
           # Each case starts from a valid contract and overrides only the field under test.
@@ -1523,7 +1540,7 @@ jobs:
             VAULT_URL=https://vault.example.invalid
             CHARON_PROXY=proxy.example.invalid:443
             CHARON_JOIN=charon-test-token; CHARON_APP=charon-test-app; CHARON_PORT=8888
-            NSPECT_ID=NSPECT-ABCD-1234; FAILURE_POLICY=strict
+            NSPECT_ID=NSPECT-ABCD-1234; FAILURE_POLICY=strict; TIMEOUT_MINUTES=60
           }
 
           run_contract() {
@@ -1541,7 +1558,10 @@ jobs:
             CHARON_PROXY_SERVER="$CHARON_PROXY" \
             CHARON_JOIN_TOKEN="$CHARON_JOIN" CHARON_APP_NAME="$CHARON_APP" \
             CHARON_LOCAL_PORT="$CHARON_PORT" \
+            SCAN_BACKOFF_SEC="$SCAN_BACKOFF_SEC" SCAN_MAX_POLL_WAIT_SEC="$SCAN_MAX_POLL_WAIT_SEC" \
+            SCAN_TIMEOUT_MARGIN_SEC="$SCAN_TIMEOUT_MARGIN_SEC" \
             INPUT_NSPECT_ID="$NSPECT_ID" INPUT_FAILURE_POLICY="$FAILURE_POLICY" \
+            INPUT_TIMEOUT_MINUTES="$TIMEOUT_MINUTES" \
               bash "$CONTRACT" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
           }
 
@@ -1593,8 +1613,24 @@ jobs:
           expect_ok  "failure_policy malicious-only is accepted"
           reset_case; CLIENT_VERSION=17.1.2
           expect_ok  "a pinned tunnel client version is accepted"
-          reset_case; IMAGE_REF="${IMAGE_PATH}:1.2.0"
-          expect_ok  "an alternative valid tag is accepted"
+          reset_case; expect_ok "the default timeout allows 33 report attempts" wait_retries 33
+          reset_case; TIMEOUT_MINUTES=090
+          expect_ok  "a zero-padded timeout is read as decimal" wait_retries 48
+
+          # Polling ends inside the job timeout less the margin, with less than one poll
+          # interval of that budget left unused.
+          for minutes in 10 60 360; do
+            reset_case; TIMEOUT_MINUTES=$minutes; run_contract
+            retries="$(contract_value wait_retries)"; polled="$(contract_value polling_seconds)"
+            budget=$(( minutes * 60 - SCAN_TIMEOUT_MARGIN_SEC ))
+            if [ "$code" -ne 0 ] || ! [[ "$retries" =~ ^[0-9]+$ && "$polled" =~ ^[0-9]+$ ]] \
+              || (( polled > budget || polled + SCAN_MAX_POLL_WAIT_SEC <= budget )); then
+              echo "::error::timeout_minutes=${minutes}: ${retries:-?} attempts over ${polled:-?} s do not fit a ${budget} s polling budget"
+              failures=$((failures+1))
+            else
+              echo "✓ timeout_minutes=${minutes} gives ${retries} attempts over ${polled} s of a ${budget} s budget"
+            fi
+          done
 
           # Two calls in one run must not collide on artifact or container names.
           reset_case; run_contract; first="$(contract_value call_id)"
@@ -1619,20 +1655,25 @@ jobs:
           expect_rejected "a missing Charon proxy variable is named" \
             "Missing Actions variable(s): CHARON_PROXY_SERVER."
 
-          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-malware-scanner-cli:1.2.0"
-          expect_rejected "a foreign registry is rejected"        "hosted on"
+          image_error="MALWARE_SCAN_PULSE_IMAGE must be the"
+          reset_case; IMAGE_REF="registry.invalid/0000000000000000/pulse/pulse-malware-scanner-cli@${PINNED_DIGEST}"
+          expect_rejected "a foreign registry is rejected"        "$image_error"
           # The registry match is anchored and its dot is literal.
           reset_case; IMAGE_REF="registry.invalid/${GOOD_IMAGE}"
-          expect_rejected "the allowed host behind another host is rejected" "hosted on"
-          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-malware-scanner-cli:1.2.0"
-          expect_rejected "a lookalike host is rejected"          "hosted on"
-          reset_case; IMAGE_REF=":1.2.0"
-          expect_rejected "an unset image variable is rejected"   "MALWARE_SCAN_PULSE_IMAGE"
-          reset_case; IMAGE_REF="${IMAGE_PATH}:"
-          expect_rejected "an unset tag variable is rejected"     "MALWARE_SCAN_PULSE_IMAGE_TAG"
-          # A tag cannot carry a second reference.
-          reset_case; IMAGE_REF="${IMAGE_PATH}:latest@sha256:${GOOD_SHA}${GOOD_SHA:0:24}"
-          expect_rejected "a tag smuggling a digest is rejected"  "carry a valid tag"
+          expect_rejected "the allowed host behind another host is rejected" "$image_error"
+          reset_case; IMAGE_REF="nvcrXio/0000000000000000/pulse/pulse-malware-scanner-cli@${PINNED_DIGEST}"
+          expect_rejected "a lookalike host is rejected"          "$image_error"
+          reset_case; IMAGE_REF="@${PINNED_DIGEST}"
+          expect_rejected "an unset image variable is rejected"   "$image_error"
+          # The variable names a repository only; what runs is the workflow's digest.
+          reset_case; IMAGE_REF="${IMAGE_PATH}:1.3.0@${PINNED_DIGEST}"
+          expect_rejected "an image variable carrying a tag is rejected"    "$image_error"
+          reset_case; IMAGE_REF="${IMAGE_PATH}@sha256:${GOOD_SHA}${GOOD_SHA:0:24}@${PINNED_DIGEST}"
+          expect_rejected "an image variable carrying a digest is rejected" "$image_error"
+          reset_case; IMAGE_REF="${ALLOWED_REGISTRY}/0000000000000000/pulse/other-scanner@${PINNED_DIGEST}"
+          expect_rejected "another repository is rejected"        "$image_error"
+          reset_case; IMAGE_REF="${ALLOWED_REGISTRY}/0000000000000000/pulse/fork-pulse-malware-scanner-cli@${PINNED_DIGEST}"
+          expect_rejected "a repository name that only ends in the scanner's is rejected" "$image_error"
 
           reset_case; CLIENT_VERSION=latest
           expect_rejected "a non-semver tunnel client version is rejected" "bare semantic version"
@@ -1667,6 +1708,14 @@ jobs:
           expect_rejected "a lowercase nSpect id is rejected" "must be a valid nSpect ID"
           reset_case; FAILURE_POLICY=warn
           expect_rejected "an unknown failure_policy is rejected" "failure_policy must be"
+          reset_case; TIMEOUT_MINUTES=9
+          expect_rejected "a timeout under 10 minutes is rejected"  "timeout_minutes must be"
+          reset_case; TIMEOUT_MINUTES=361
+          expect_rejected "a timeout over 360 minutes is rejected"  "timeout_minutes must be"
+          reset_case; TIMEOUT_MINUTES=30.5
+          expect_rejected "a fractional timeout is rejected"        "timeout_minutes must be"
+          reset_case; TIMEOUT_MINUTES=
+          expect_rejected "an empty timeout is rejected"            "timeout_minutes must be"
 
           # The scan target comes from the run context but is still validated before the
           # service clones it.
@@ -2150,7 +2199,7 @@ jobs:
   # Malware scan (Pulse) — live integration.
   #
   # Gated on ENABLE_PULSE_INTEGRATION, shared with the secret-scan live jobs. Requires
-  # NSPECT_ID, the CHARON_* variables, an image tag with the source-code-scan command, and a
+  # NSPECT_ID, the MALWARE_SCAN_PULSE_IMAGE repository path, the CHARON_* variables, and a
   # Charon tenant that lists the triggering ref and the scan's routes.
   #
   # Proves transport and a CLEAN verdict only. Detection needs a ProdSec-approved sample,

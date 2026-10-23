@@ -159,6 +159,13 @@ on:
         type: boolean
         required: false
         default: false
+      malware-timeout-minutes:
+        description: >-
+          Job timeout for the Pulse malware scan, in minutes (10 to 360). The scan's report
+          polling is derived from it.
+        type: number
+        required: false
+        default: 60
       sast-languages:
         description: >-
           JSON array of CodeQL languages, for example '["actions","python"]'.
@@ -277,6 +284,7 @@ jobs:
       nspect_id: ${{ inputs.nspect-id }}
       failure_policy: ${{ inputs.malware-failure-policy }}
       upload_report: ${{ inputs.malware-upload-report }}
+      timeout_minutes: ${{ inputs.malware-timeout-minutes }}
 
   sast-scan:
     name: SAST (CodeQL)

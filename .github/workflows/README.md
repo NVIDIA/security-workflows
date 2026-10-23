@@ -105,6 +105,7 @@ jobs:
       # malware-runs-on: linux-amd64-cpu4
       # malware-failure-policy: malicious-only
       # malware-upload-report: true
+      # malware-timeout-minutes: 90
       # sast-runs-on: ubuntu-latest
       # sast-build-mode: autobuild
       # sast-queries: +security-and-quality
@@ -216,7 +217,8 @@ Scan-specific prerequisites:
 
 - **Self-hosted runners only.** OIDC → Vault, `nvcr.io`, and the Charon tunnel are all unreachable from GitHub-hosted runners.
 - **nSpect registration.** Register the repository and set its ID as a repository variable `NSPECT_ID`, then pass it as `nspect_id`. The scanner accepts only the uppercase form, `NSPECT-XXXX-XXXX`, so the workflow refuses anything else before it pulls the image.
-- **Platform variables**, provisioned for the organization by the GitHub-First platform team: `NV_VAULT_URL`, `NVCR_VAULT_ROLE`, `NVCR_VAULT_JWT_PATH`, `NVCR_VAULT_NAMESPACE`, `NVCR_VAULT_SECRET_PATH`, `MALWARE_SCAN_PULSE_IMAGE`, `MALWARE_SCAN_PULSE_IMAGE_TAG`, `CHARON_PROXY_SERVER` (the production Charon proxy), `CHARON_JOIN_TOKEN`, `CHARON_APP_NAME`, `CHARON_LOCAL_PORT`. A missing one is named by the workflow rather than surfacing later as a Vault, Teleport, or tunnel startup failure. The image must be hosted on `nvcr.io`, and the tag must name a scanner build that has the `source-code-scan` command (`1.2.0-alpha6` or later) — an older image fails as `scanner-version-unsupported`.
+- **Platform variables**, provisioned for the organization by the GitHub-First platform team: `NV_VAULT_URL`, `NVCR_VAULT_ROLE`, `NVCR_VAULT_JWT_PATH`, `NVCR_VAULT_NAMESPACE`, `NVCR_VAULT_SECRET_PATH`, `MALWARE_SCAN_PULSE_IMAGE`, `CHARON_PROXY_SERVER` (the production Charon proxy), `CHARON_JOIN_TOKEN`, `CHARON_APP_NAME`, `CHARON_LOCAL_PORT`. A missing one is named by the workflow rather than surfacing later as a Vault, Teleport, or tunnel startup failure.
+- **Scanner image pinned by digest.** The workflow pins the scanner image's digest (currently the `1.3.0` release), and Docker verifies the pulled image against it. `MALWARE_SCAN_PULSE_IMAGE` is only the path of the `pulse-malware-scanner-cli` repository on `nvcr.io`, with no tag or digest, so a caller can choose where the image comes from but not what runs. `MALWARE_SCAN_PULSE_IMAGE_TAG` is not read. A new scanner release reaches callers as a new release of this workflow.
 - **Optional `MALWARE_SCAN_TUNNEL_CLIENT_VERSION`** pins the Teleport tunnel client to an approved bare semver. Leave it unset and the version is resolved from the Charon proxy; pinning is the supply-chain-safer choice.
 - **Trigger model**, identical to the secret scan: the workflow **rejects `pull_request` and `pull_request_target`**, so call it from `push`, `schedule`, or `workflow_dispatch`. Pull-request coverage comes from `copy-pr-bot`'s `pull-request/<n>` mirror branches, added to your `push` filter as the [pilot consumers already do](../../README.md#onboarding-a-repository).
 - **Charon allowlist — refs *and* routes.** Charon authorizes per tenant, per ref, and per route, so the repository's tenant must list the calling ref and every nSpect and Pulse Malware Service route the scan uses. The scan-submission route is not in the set tenants are granted by default and needs platform approval. A ref or route the tenant does not list fails the scan; it never passes it. A tenant that does not list the copy-pr-bot mirror refs (`refs/heads/pull-request/*`) makes this scan a post-merge and scheduled gate rather than a merge gate.
@@ -228,10 +230,12 @@ A MALICIOUS verdict is a security event, not a flaky check: re-running the job s
 
 Every run scans the whole tree at the commit, not a diff; a commit the service has already scanned may be served from its cache.
 
-Results are the job summary — verdict, flagged-item breakdown, allowlist and cache state, and the **Pulse scan ID**, the join key to the service's record of the scan — plus, with `upload_report: true`, the validated report as a 3-day artifact with the nSpect ID redacted. A report carrying anything credential-shaped is withheld from the artifact with a warning; the verdict is unaffected. Findings do not appear under code scanning.
-The image the job runs is named by Actions variables, which resolve against the *caller*, so the service's record found by the Pulse scan ID — not the job's own verdict — is the record of account.
+`timeout_minutes` (default `60`, from 10 to 360) is the job timeout, and the scanner's report polling is derived from it: the sleep between attempts doubles from 2 seconds to a 120-second cap, and polling stops 5 minutes before the timeout, which leaves time for the steps around it. With the default, the scan waits up to about 54 minutes for its report. A scan that outlasts the budget fails as `timeout`, closed like every scan without a verdict, rather than as a cancelled job with no diagnostic. Raise it for repositories the service takes longer to scan.
 
-Key inputs: `nspect_id` (required), `runs-on` (default `linux-amd64-cpu4`), `failure_policy` (default `strict`), `upload_report` (default `false`).
+Results are the job summary — verdict, flagged-item breakdown, allowlist and cache state, and the **Pulse scan ID**, the join key to the service's record of the scan — plus, with `upload_report: true`, the validated report as a 3-day artifact with the nSpect ID redacted. A report carrying anything credential-shaped is withheld from the artifact with a warning; the verdict is unaffected. Findings do not appear under code scanning.
+The scanner image is pinned, but the Vault and Charon variables still resolve against the *caller*, so the service's record found by the Pulse scan ID — not the job's own verdict — is the record of account. The job summary records the image digest each run used.
+
+Key inputs: `nspect_id` (required), `runs-on` (default `linux-amd64-cpu4`), `failure_policy` (default `strict`), `upload_report` (default `false`), `timeout_minutes` (default `60`).
 Outputs: `verdict`, `flagged_count`, `scanner_exit_code`, `scan_id`.
 
 ```yaml
@@ -253,6 +257,7 @@ jobs:
     #   runs-on: linux-amd64-cpu4       # nv-gha-runners label
     #   failure_policy: malicious-only  # warn on SUSPICIOUS (default: strict — block it)
     #   upload_report: true
+    #   timeout_minutes: 90             # job timeout; report polling is derived from it
 ```
 
 ### SAST — [`sast-scan-codeql.yml`](sast-scan-codeql.yml)
