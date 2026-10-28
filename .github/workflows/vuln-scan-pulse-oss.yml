@@ -530,21 +530,23 @@ jobs:
           # The CLI rejects path separators here, so it writes into workdir /tmp instead.
           report_name="vulnerability-report.json"
 
-          # Detect writes its status file to <scan path>/bd_nspect and Pulse reads the scan
-          # results back out of it, so a read-only source silently costs every finding. That
-          # directory gets a tmpfs below, so the scanner still cannot alter a checked-out file
-          # and the status never reaches the host. Docker will not create a mount point inside
-          # a read-only bind, so it has to exist first — and this is a consumer's working
-          # tree, so the cleanup step takes it away again.
-          status_dir="$CONTAINER_SCAN_PATH/bd_nspect"
-          host_status_dir="${GITHUB_WORKSPACE}/${status_dir#/workspace/}"
-          mkdir -p "$host_status_dir"
+          # The scan needs a writable tree. Pulse reads its own status back out of
+          # <scan path>/bd_nspect, and Detect's SETUPTOOLS and UV detectors generate metadata
+          # next to every project they find — a read-only mount turns those into detector
+          # failures, which Detect reports as a non-zero status rather than as a partial scan.
+          # So the container gets a throwaway copy instead: the consumer's working tree is
+          # never mounted, and the scanner may write anywhere inside the copy. The permissions
+          # are open because the image runs unprivileged and copies in as the runner's uid, and
+          # Pulse walks the tree with du, which fails the whole scan on an unreadable directory.
+          scan_root="$(mktemp -d "${RUNNER_TEMP}/pulse-oss-src.XXXXXX")"
+          cp -a "$GITHUB_WORKSPACE/." "$scan_root/"
+          chmod -R a+rwX "$scan_root"
 
           {
             printf 'PULSE_OSS_OUTPUT_DIR=%s\n' "$output_dir"
             printf 'PULSE_OSS_RAW_LOG=%s\n' "$raw_log"
             printf 'PULSE_OSS_CONTAINER=%s\n' "$container_name"
-            printf 'PULSE_OSS_STATUS_DIR=%s\n' "$host_status_dir"
+            printf 'PULSE_OSS_SCAN_ROOT=%s\n' "$scan_root"
           } >> "$GITHUB_ENV"
 
           # Findings never set the exit code: the CLI always runs --no-fail, and the enforce step
@@ -601,16 +603,14 @@ jobs:
 
           # --network host is required: the scanner reaches Charon over the loopback tunnel.
           # The scan reads a dependency tree an untrusted contributor controls, so the
-          # container gets no capabilities and cannot acquire any. mode=1777 on the tmpfs
-          # because the image runs unprivileged and Pulse walks the tree with du, which
-          # fails the whole scan on a directory it cannot read.
+          # container gets no capabilities and cannot acquire any. The only thing it can
+          # write to is the throwaway copy above.
           docker create \
             --name "$container_name" \
             --network host \
             --workdir /tmp \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
-            --tmpfs "$status_dir:rw,noexec,nosuid,size=16m,mode=1777" \
             --env ACTIONS_ID_TOKEN_REQUEST_URL \
             --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             --env CI=true \
@@ -619,7 +619,7 @@ jobs:
             --env PULSE_REPO_URL \
             --env PULSE_REPO_BRANCH \
             --env PULSE_CHARON_URL \
-            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$scan_root:/workspace:rw" \
             "$SCANNER_IMAGE_REF" \
             "${command[@]}" >/dev/null
 
@@ -1099,8 +1099,7 @@ jobs:
           docker image rm --force "$SCANNER_IMAGE_REF" >/dev/null 2>&1 || true
           rm -f "${PULSE_OSS_TBOT_CONFIG:-}" "${PULSE_OSS_TBOT_LOG:-}" "${PULSE_OSS_RAW_LOG:-}"
           [[ -z "${DOCKER_CONFIG:-}" ]] || rm -rf "$DOCKER_CONFIG"
-          # Give the caller back the tree it checked out. rmdir, never rm -rf: this path sits
-          # inside a working directory, and the tmpfs shadowed it, so it should be empty —
-          # if it is not, something wrote outside the mount and is worth leaving to find.
-          [[ -z "${PULSE_OSS_STATUS_DIR:-}" ]] \
-            || rmdir "$PULSE_OSS_STATUS_DIR" 2>/dev/null || true
+          # The scan copy is disposable and lives under RUNNER_TEMP, never in the caller's
+          # working tree, so it goes away whole.
+          [[ -z "${PULSE_OSS_SCAN_ROOT:-}" ]] \
+            || rm -rf "$PULSE_OSS_SCAN_ROOT" 2>/dev/null || true
