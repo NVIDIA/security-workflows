@@ -132,9 +132,9 @@ jobs:
       scanner_exit_code: ${{ steps.scanner.outputs.exit_code }}
       scanner_image_digest: ${{ steps.image.outputs.digest }}
     env:
-      # Approved stable release (charon-stable as of 2026-10-23). Pinned by digest because the
-      # scanner receives the job's OIDC request credentials; callers cannot substitute it.
-      SCANNER_IMAGE_REF: nvcr.io/0898940053369630/pulse/pulse-oss-cli@sha256:f84e3a9b2e31de061e8ab697456e64c1428777db2fae307fc3afb57d31ef9aff
+      # Approved stable release 0.5.3-charon.11 (charon-stable since 2026-10-27). Pinned by digest
+      # because the scanner receives the job's OIDC request credentials; callers cannot substitute it.
+      SCANNER_IMAGE_REF: nvcr.io/0898940053369630/pulse/pulse-oss-cli@sha256:44481e18efdf384fc212eea3a300ae001385e10d1e2d05e92a8a7d350b328c60
       SCANNER_IMAGE_ALLOWED_REGISTRY: nvcr.io
       CHARON_PROXY_SERVER: ext-nv-prd-apps.teleport.sh:443
       CHARON_JOIN_TOKEN: charon-gha-runners
