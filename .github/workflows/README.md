@@ -155,6 +155,9 @@ jobs:
 
 ### Vulnerability scan (SCA) — [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml)
 
+For dependency preparation and current setup limitations, see
+[Build environments for vulnerability scans](../../docs/vuln-scan/README.md).
+
 Runs NVIDIA's **Pulse OSS scanner** against the dependency graph under `scan_path` and reports findings to the **nSpect** vulnerability backend, so they become findings of record rather than only CI output.
 The scanner is pulled from `nvcr.io` and reaches nSpect through a Charon application tunnel on loopback. **GitHub OIDC is the only identity presented** — no service account, registry credential, or backend token enters the job. The scanner image is **pinned by digest inside the workflow** (the approved `charon-stable` release), so a caller cannot substitute another image, and every run records the digest it executed in the job summary and the `scanner_image_digest` output. A scanner upgrade is a digest change in this repository. The container runs with no capabilities, cannot acquire any, and sees your checkout read-only.
 
