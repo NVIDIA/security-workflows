@@ -127,6 +127,36 @@ on:
         type: string
         required: false
         default: report-only
+      vuln-snippet-scan:
+        description: Enable snippet matching for a registered persistent scan, without inventory write-back.
+        type: boolean
+        required: false
+        default: false
+      vuln-detect-properties:
+        description: JSON object of supported Detect tuning properties. See docs/vuln-scan.
+        type: string
+        required: false
+        default: '{}'
+      vuln-show-console:
+        description: Print scanner output with credentials and internal destinations removed.
+        type: boolean
+        required: false
+        default: false
+      vuln-debug-logging:
+        description: Enable Pulse debug logging. Required redaction still applies.
+        type: boolean
+        required: false
+        default: false
+      vuln-python-wheels-artifact:
+        description: Current-run artifact of prebuilt Python runtime wheels. Requires vuln-python-project.
+        type: string
+        required: false
+        default: ''
+      vuln-python-project:
+        description: Installed Python distribution to inspect from the supplied runtime wheels.
+        type: string
+        required: false
+        default: ''
       vuln-inventory-writeback:
         description: Publish results to nSpect inventory (persistent scans only). Requires vuln-sbom-name.
         type: boolean
@@ -268,7 +298,13 @@ jobs:
       scan_path: ${{ inputs.vuln-scan-path }}
       scan_mode: ${{ inputs.vuln-scan-mode }}
       build: ${{ inputs.vuln-build }}
+      python_wheels_artifact: ${{ inputs.vuln-python-wheels-artifact }}
+      python_project: ${{ inputs.vuln-python-project }}
       failure_policy: ${{ inputs.vuln-failure-policy }}
+      snippet_scan: ${{ inputs.vuln-snippet-scan }}
+      detect_properties: ${{ inputs.vuln-detect-properties }}
+      show_console: ${{ inputs.vuln-show-console }}
+      debug_logging: ${{ inputs.vuln-debug-logging }}
       inventory_writeback: ${{ inputs.vuln-inventory-writeback }}
       upload_report: ${{ inputs.vuln-upload-report }}
       timeout_seconds: ${{ inputs.vuln-timeout-seconds }}
