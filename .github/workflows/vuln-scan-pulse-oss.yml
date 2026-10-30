@@ -1642,6 +1642,13 @@ jobs:
               || cleanup_failed=1
             [[ -z "$remaining" ]] || cleanup_failed=1
           fi
+          # Detectors write into the scan copy as the image's unprivileged user (.egg-info,
+          # __pycache__), and the runner cannot delete inside directories it does not own.
+          if [[ -n "${PULSE_OSS_SCAN_ROOT:-}" && -d "$PULSE_OSS_SCAN_ROOT" ]]; then
+            docker run --rm --network none --cap-drop=ALL --security-opt=no-new-privileges \
+              --entrypoint chmod --volume "$PULSE_OSS_SCAN_ROOT:/workspace" \
+              "$SCANNER_IMAGE_REF" -R a+rwX /workspace >/dev/null 2>&1 || true
+          fi
           # Keep the verified immutable image cached; it contains no per-job credentials.
           for path in "${PULSE_OSS_TBOT_CONFIG:-}" "${PULSE_OSS_TBOT_LOG:-}" \
             "${PULSE_OSS_RAW_LOG:-}" "${DOCKER_CONFIG:-}" "${PULSE_OSS_SCAN_ROOT:-}" \
