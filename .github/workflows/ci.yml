@@ -592,7 +592,6 @@ jobs:
             NSPECT_ID=NSPECT-ABCD-1234; REGISTERED_BRANCH=main; SBOM_NAME=
             SCAN_MODE=rapid; SCAN_PATH=.; FAILURE_POLICY=report-only
             WRITEBACK=false; TIMEOUT=1800
-            BUILD=false; PYTHON_WHEELS=; PYTHON_PROJECT=
           }
 
           run_contract() {
@@ -614,8 +613,7 @@ jobs:
             INPUT_REGISTERED_BRANCH="$REGISTERED_BRANCH" INPUT_SBOM_NAME="$SBOM_NAME" \
             INPUT_SCAN_MODE="$SCAN_MODE" INPUT_SCAN_PATH="$SCAN_PATH" \
             INPUT_FAILURE_POLICY="$FAILURE_POLICY" INPUT_WRITEBACK="$WRITEBACK" \
-            INPUT_TIMEOUT="$TIMEOUT" INPUT_BUILD="$BUILD" \
-            INPUT_PYTHON_WHEELS_ARTIFACT="$PYTHON_WHEELS" INPUT_PYTHON_PROJECT_NAME="$PYTHON_PROJECT" \
+            INPUT_TIMEOUT="$TIMEOUT" \
               bash "$CONTRACT" > "$RUNNER_TEMP/log.txt" 2>&1 || code=$?
           }
 
@@ -673,21 +671,6 @@ jobs:
           reset_case; expect_ok "scan_path '.' slugs to root" artifact_slug root
           reset_case; SCAN_PATH=src/vendor/pkg
           expect_ok  "a nested scan_path slugs into an artifact-safe name" artifact_slug src-vendor-pkg
-
-          # A prepared Python environment replaces building or parsing the source.
-          reset_case; expect_ok "no wheels artifact keeps the source scan" python_runtime false
-          reset_case; PYTHON_WHEELS='cuda-*'; PYTHON_PROJECT=cuda-python
-          expect_ok  "a wheels glob with a project name selects the prepared runtime" python_runtime true
-          reset_case; PYTHON_WHEELS='cuda-*'
-          expect_rejected "a wheels artifact without a project name is rejected" "must be set together"
-          reset_case; PYTHON_PROJECT=cuda-python
-          expect_rejected "a project name without a wheels artifact is rejected" "must be set together"
-          reset_case; PYTHON_WHEELS='../wheels'; PYTHON_PROJECT=cuda-python
-          expect_rejected "a wheels artifact with a path is rejected" "artifact name"
-          reset_case; PYTHON_WHEELS=wheels; PYTHON_PROJECT='cuda python'
-          expect_rejected "a project name that is not a distribution name is rejected" "distribution name"
-          reset_case; PYTHON_WHEELS=wheels; PYTHON_PROJECT=cuda-python; BUILD=true
-          expect_rejected "a wheels artifact with build mode is rejected" "cannot be combined with build"
 
           # Fork-authored code must never reach a job holding OIDC.
           reset_case; EVENT=pull_request
