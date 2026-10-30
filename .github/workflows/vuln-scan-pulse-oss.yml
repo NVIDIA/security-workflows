@@ -850,7 +850,7 @@ jobs:
           host_scan_path="$scan_root${CONTAINER_SCAN_PATH#/workspace}"
           rm -rf "$host_scan_path/bd_nspect"
           # Keep the fresh status directory runner-owned for cross-user cleanup.
-          install -d -m 777 "$host_scan_path/bd_nspect"
+          mkdir -m 777 "$host_scan_path/bd_nspect"
 
           {
             printf 'PULSE_OSS_CONTAINER=%s\n' "$container_name"
