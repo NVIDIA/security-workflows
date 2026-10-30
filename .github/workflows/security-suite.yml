@@ -120,6 +120,19 @@ on:
         type: boolean
         required: false
         default: false
+      vuln-python-wheels-artifact:
+        description: >-
+          Name or glob of artifacts uploaded earlier in this run holding Python wheels. The scan
+          inspects an environment built from them with only Detect's PIP detector. Needs
+          vuln-python-project-name; not combinable with vuln-build.
+        type: string
+        required: false
+        default: ''
+      vuln-python-project-name:
+        description: Distribution name Detect inspects in the vuln-python-wheels-artifact environment.
+        type: string
+        required: false
+        default: ''
       vuln-failure-policy:
         description: >-
           Pulse OSS finding policy: report-only (default) or fail-on-vulnerability.
@@ -268,6 +281,8 @@ jobs:
       scan_path: ${{ inputs.vuln-scan-path }}
       scan_mode: ${{ inputs.vuln-scan-mode }}
       build: ${{ inputs.vuln-build }}
+      python_wheels_artifact: ${{ inputs.vuln-python-wheels-artifact }}
+      python_project_name: ${{ inputs.vuln-python-project-name }}
       failure_policy: ${{ inputs.vuln-failure-policy }}
       inventory_writeback: ${{ inputs.vuln-inventory-writeback }}
       upload_report: ${{ inputs.vuln-upload-report }}

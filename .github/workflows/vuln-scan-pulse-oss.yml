@@ -63,6 +63,21 @@ on:
         type: boolean
         required: false
         default: false
+      python_wheels_artifact:
+        description: >-
+          Name or glob of artifacts uploaded earlier in this workflow run holding Python wheels,
+          for packages whose dependencies Detect cannot resolve from source (a dynamic setup.py,
+          a build that needs a toolchain). The wheels and their runtime dependencies are installed
+          into a separate environment that must pass pip check, and Detect inspects it with only
+          its PIP detector. Needs python_project_name; not combinable with build.
+        type: string
+        required: false
+        default: ''
+      python_project_name:
+        description: Distribution name Detect inspects in the python_wheels_artifact environment.
+        type: string
+        required: false
+        default: ''
       failure_policy:
         description: >-
           Pipeline failure behavior on findings. The scan always produces the full report;
@@ -153,6 +168,9 @@ jobs:
           INPUT_FAILURE_POLICY: ${{ inputs.failure_policy }}
           INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+          INPUT_BUILD: ${{ inputs.build }}
+          INPUT_PYTHON_WHEELS_ARTIFACT: ${{ inputs.python_wheels_artifact }}
+          INPUT_PYTHON_PROJECT_NAME: ${{ inputs.python_project_name }}
           NV_VAULT_URL: ${{ vars.NV_VAULT_URL }}
           NVCR_VAULT_ROLE: ${{ vars.NVCR_VAULT_ROLE }}
           NVCR_VAULT_JWT_PATH: ${{ vars.NVCR_VAULT_JWT_PATH }}
@@ -308,6 +326,33 @@ jobs:
             exit 1
           fi
 
+          python_wheels="${INPUT_PYTHON_WHEELS_ARTIFACT:-}"
+          python_project="${INPUT_PYTHON_PROJECT_NAME:-}"
+          python_runtime=false
+          if [[ -n "$python_wheels" || -n "$python_project" ]]; then
+            if [[ -z "$python_wheels" || -z "$python_project" ]]; then
+              echo "::error::python_wheels_artifact and python_project_name must be set together."
+              exit 1
+            fi
+            # An artifact name or glob from this run; no path separators or other wildcards.
+            if [[ ! "$python_wheels" =~ ^[A-Za-z0-9][A-Za-z0-9._*-]{0,127}$ ]]; then
+              echo "::error::python_wheels_artifact must be an artifact name or a '*' glob of one."
+              exit 1
+            fi
+            # A PEP 508 distribution name. It becomes a Detect property value.
+            if [[ ! "$python_project" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$ ]]; then
+              echo "::error::python_project_name must be a Python distribution name."
+              exit 1
+            fi
+            # Build mode resolves from source, which is what the prepared environment replaces.
+            if [[ "${INPUT_BUILD:-false}" == true ]]; then
+              echo "::error::python_wheels_artifact cannot be combined with build."
+              exit 1
+            fi
+            python_runtime=true
+          fi
+          printf 'python_runtime=%s\n' "$python_runtime" >> "$GITHUB_OUTPUT"
+
           # Private Docker config, so the registry login can be destroyed on its own.
           docker_config="$RUNNER_TEMP/pulse-oss-docker"
           install -d -m 700 "$docker_config"
@@ -456,6 +501,55 @@ jobs:
         if: always()
         run: docker logout nvcr.io >/dev/null 2>&1 || true
 
+      - name: Download Python wheels
+        if: steps.contract.outputs.python_runtime == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: ${{ inputs.python_wheels_artifact }}
+          path: ${{ runner.temp }}/pulse-oss-wheels
+          merge-multiple: true
+
+      # Built from the scanner image so the environment matches the Python Detect runs, in a
+      # container that gets no OIDC variables or registry login. --only-binary keeps install
+      # from running any package's build code. Dependencies the wheels need come from PyPI.
+      - name: Prepare Python runtime environment
+        if: steps.contract.outputs.python_runtime == 'true'
+        env:
+          WHEELS_DIR: ${{ runner.temp }}/pulse-oss-wheels
+          VENV_DIR: ${{ runner.temp }}/pulse-oss-venv
+        run: |
+          set -euo pipefail
+          {
+            printf 'PULSE_OSS_WHEELS_DIR=%s\n' "$WHEELS_DIR"
+            printf 'PULSE_OSS_VENV_DIR=%s\n' "$VENV_DIR"
+          } >> "$GITHUB_ENV"
+          shopt -s nullglob
+          wheels=("$WHEELS_DIR"/*.whl)
+          if (( ${#wheels[@]} == 0 )); then
+            echo "::error::python_wheels_artifact matched no .whl files among this run's artifacts."
+            exit 1
+          fi
+          printf 'Installing %s\n' "${wheels[@]##*/}"
+          mkdir -p "$VENV_DIR"
+          # Same path in both containers: a venv's scripts name their interpreter by absolute path.
+          if ! docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --env HOME=/tmp \
+            --volume "$WHEELS_DIR:/pulse-wheels:ro" \
+            --volume "$VENV_DIR:/pulse-venv:rw" \
+            "$SCANNER_IMAGE_REF" \
+            /bin/sh -euc '
+              /opt/miniforge/bin/python -m venv /pulse-venv
+              /pulse-venv/bin/python -m pip --isolated --disable-pip-version-check --no-cache-dir \
+                install --only-binary=:all: /pulse-wheels/*.whl
+              /pulse-venv/bin/python -m pip --isolated --disable-pip-version-check check
+            '; then
+            echo "::error::The Python runtime environment could not be prepared, or failed pip check."
+            exit 1
+          fi
+
       - name: Install Charon tunnel client
         uses: teleport-actions/setup@b638ff596557cc3959eb6b5287d5e58e0c8ac6a6  # v1
         with:
@@ -520,6 +614,8 @@ jobs:
           INPUT_BUILD: ${{ inputs.build }}
           INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+          PYTHON_RUNTIME: ${{ steps.contract.outputs.python_runtime }}
+          INPUT_PYTHON_PROJECT_NAME: ${{ inputs.python_project_name }}
         run: |
           set -euo pipefail
           umask 077
@@ -601,6 +697,20 @@ jobs:
           fi
           command+=("$CONTAINER_SCAN_PATH")
 
+          # Detect reads DETECT_* as its own properties. Only the PIP detector runs against the
+          # prepared environment: the others would build or parse the source it replaces.
+          unset DETECT_PYTHON_PATH DETECT_PIP_PATH DETECT_INCLUDED_DETECTOR_TYPES \
+            DETECT_PIP_PROJECT_NAME DETECT_PIP_ONLY_PROJECT_TREE
+          runtime_mount=()
+          if [[ "$PYTHON_RUNTIME" == true ]]; then
+            export DETECT_PYTHON_PATH=/pulse-venv/bin/python
+            export DETECT_PIP_PATH=/pulse-venv/bin/pip
+            export DETECT_INCLUDED_DETECTOR_TYPES=PIP
+            export DETECT_PIP_PROJECT_NAME="$INPUT_PYTHON_PROJECT_NAME"
+            export DETECT_PIP_ONLY_PROJECT_TREE=true
+            runtime_mount=(--volume "$PULSE_OSS_VENV_DIR:/pulse-venv:ro")
+          fi
+
           # --network host is required: the scanner reaches Charon over the loopback tunnel.
           # The scan reads a dependency tree an untrusted contributor controls, so the
           # container gets no capabilities and cannot acquire any. The only thing it can
@@ -619,7 +729,13 @@ jobs:
             --env PULSE_REPO_URL \
             --env PULSE_REPO_BRANCH \
             --env PULSE_CHARON_URL \
+            --env DETECT_PYTHON_PATH \
+            --env DETECT_PIP_PATH \
+            --env DETECT_INCLUDED_DETECTOR_TYPES \
+            --env DETECT_PIP_PROJECT_NAME \
+            --env DETECT_PIP_ONLY_PROJECT_TREE \
             --volume "$scan_root:/workspace:rw" \
+            ${runtime_mount[@]+"${runtime_mount[@]}"} \
             "$SCANNER_IMAGE_REF" \
             "${command[@]}" >/dev/null
 
@@ -630,6 +746,33 @@ jobs:
 
           docker cp "$container_name:/tmp/$report_name" \
             "$output_dir/$report_name" >/dev/null 2>&1 || true
+
+          # Detect also exits 0 for a project it never found, so a prepared-runtime scan counts
+          # only when the PIP detector extracted the project. Anything else is a failed scan.
+          if [[ "$PYTHON_RUNTIME" == true && "$scanner_status" -eq 0 ]]; then
+            status_json="${scan_root}${CONTAINER_SCAN_PATH#/workspace}/bd_nspect/status.json"
+            if ! STATUS_JSON="$status_json" python3 - >> "$raw_log" 2>&1 <<'PY'
+          import json
+          import os
+          import sys
+
+          try:
+              with open(os.environ["STATUS_JSON"], encoding="utf-8") as handle:
+                  status = json.load(handle)
+          except (OSError, ValueError) as error:
+              sys.exit(f"Prepared Python runtime: Detect status is unreadable ({type(error).__name__}).")
+          detectors = status.get("detectors") or []
+          if (not detectors or status.get("issues")
+                  or any(item.get("detectorType") != "PIP" or item.get("status") != "SUCCESS"
+                         or item.get("extracted") is not True for item in detectors)):
+              sys.exit("Prepared Python runtime: the PIP detector did not extract the project.")
+          print("Prepared Python runtime: the PIP detector extracted the project.")
+          PY
+            then
+              echo "::error::The prepared Python environment was not inspected: the PIP detector did not extract python_project_name."
+              scanner_status=1
+            fi
+          fi
 
           # Keep a redacted copy of the scanner's output whatever the exit status. A scanner
           # can exit 0 and still leave no usable report, and this is then the only evidence.
@@ -1103,3 +1246,5 @@ jobs:
           # working tree, so it goes away whole.
           [[ -z "${PULSE_OSS_SCAN_ROOT:-}" ]] \
             || rm -rf "$PULSE_OSS_SCAN_ROOT" 2>/dev/null || true
+          [[ -z "${PULSE_OSS_VENV_DIR:-}" ]] || rm -rf "$PULSE_OSS_VENV_DIR" 2>/dev/null || true
+          [[ -z "${PULSE_OSS_WHEELS_DIR:-}" ]] || rm -rf "$PULSE_OSS_WHEELS_DIR" 2>/dev/null || true
