@@ -63,6 +63,36 @@ on:
         type: boolean
         required: false
         default: false
+      python_wheels_artifact:
+        description: Current-run artifact containing runtime wheels for Python 3.12 on Linux amd64. Requires python_project, build false and the registered_branch ref.
+        type: string
+        required: false
+        default: ''
+      python_project:
+        description: Installed Python distribution to inspect from the supplied wheels. Uses PIP-only dependency analysis.
+        type: string
+        required: false
+        default: ''
+      snippet_scan:
+        description: Enable snippet matching for a registered-branch persistent scan. Not available with RAPID or inventory_writeback.
+        type: boolean
+        required: false
+        default: false
+      detect_properties:
+        description: JSON object of supported Detect tuning properties. See docs/vuln-scan for the allowed names and values.
+        type: string
+        required: false
+        default: '{}'
+      show_console:
+        description: Print the credential-redacted, destination-abstracted scanner log. Off by default; redaction cannot be disabled.
+        type: boolean
+        required: false
+        default: false
+      debug_logging:
+        description: Enable Pulse debug logging. Console output remains controlled by show_console and always redacted.
+        type: boolean
+        required: false
+        default: false
       failure_policy:
         description: >-
           Pipeline failure behavior on findings. The scan always produces the full report;
@@ -153,6 +183,11 @@ jobs:
           INPUT_FAILURE_POLICY: ${{ inputs.failure_policy }}
           INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+          INPUT_BUILD: ${{ inputs.build }}
+          INPUT_PYTHON_WHEELS_ARTIFACT: ${{ inputs.python_wheels_artifact }}
+          INPUT_PYTHON_PROJECT: ${{ inputs.python_project }}
+          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
+          INPUT_DETECT_PROPERTIES: ${{ inputs.detect_properties }}
           NV_VAULT_URL: ${{ vars.NV_VAULT_URL }}
           NVCR_VAULT_ROLE: ${{ vars.NVCR_VAULT_ROLE }}
           NVCR_VAULT_JWT_PATH: ${{ vars.NVCR_VAULT_JWT_PATH }}
@@ -308,6 +343,124 @@ jobs:
             exit 1
           fi
 
+          if [[ -n "${INPUT_PYTHON_WHEELS_ARTIFACT:-}${INPUT_PYTHON_PROJECT:-}" ]]; then
+            if [[ ! "${INPUT_PYTHON_WHEELS_ARTIFACT:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+              || [[ ! "${INPUT_PYTHON_PROJECT:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+              echo "::error::Set both python_wheels_artifact and python_project to simple names."
+              exit 1
+            fi
+            # Installed wheels can contain executable code. This first version uses only
+            # the selected regular branch, never pull-request mirrors or arbitrary setup.
+            if [[ "$GITHUB_REF" != "refs/heads/$INPUT_REGISTERED_BRANCH" || "${INPUT_BUILD:-false}" == true ]]; then
+              echo "::error::Prebuilt Python setup requires the registered_branch ref and build false."
+              exit 1
+            fi
+          fi
+
+          if [[ "${INPUT_SNIPPET_SCAN:-false}" == true ]] \
+            && [[ "$resolved_mode" != persistent || "$INPUT_WRITEBACK" == true ]]; then
+            echo "::error::snippet_scan requires a registered-branch persistent scan with inventory_writeback false."
+            exit 1
+          fi
+
+          # Parse data, never shell fragments. The workflow owns identity, paths, engines,
+          # result waiting and timeout; no property may bypass those controls.
+          RESOLVED_MODE="$resolved_mode" python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def unique_object(pairs):
+              """Reject duplicate property names instead of silently taking the last value."""
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError("duplicate property")
+                  result[key] = value
+              return result
+
+          try:
+              raw = os.environ.get("INPUT_DETECT_PROPERTIES", "{}")
+              if len(raw) > 8192:
+                  raise ValueError("oversized properties")
+              properties = json.loads(raw, object_pairs_hook=unique_object)
+              if not isinstance(properties, dict):
+                  raise ValueError("not an object")
+              # The string-valued settings below are bounded lists/names, not executables
+              # or command arguments. Unknown spellings are deliberately not normalized.
+              strings = {
+                  "detect.included.detector.types", "detect.excluded.detector.types",
+                  "detect.required.detector.types", "detect.excluded.directories",
+                  "detect.accuracy.required", "detect.pip.project.name",
+                  "detect.pip.project.version.name", "detect.maven.excluded.scopes",
+                  "detect.gradle.included.configurations", "detect.poetry.dependency.groups.excluded",
+                  "detect.uv.dependency.groups.excluded", "detect.npm.dependency.types.excluded",
+              }
+              booleans = {"detect.pip.only.project.tree", "detect.excluded.directories.defaults.disabled"}
+              full_only = {
+                  "detect.blackduck.signature.scanner.individual.file.matching": {"NONE", "SOURCE", "BINARY", "ALL"},
+                  "detect.blackduck.signature.scanner.reduced.persistence": {"DEFAULT", "RETAIN_UNMATCHED", "DISCARD_UNMATCHED"},
+                  "detect.blackduck.signature.scanner.license.search": {True, False},
+                  "detect.blackduck.signature.scanner.copyright.search": {True, False},
+                  "detect.blackduck.signature.scanner.memory": None,
+              }
+              detector_types = set("BITBAKE CARGO CARTHAGE COCOAPODS CONAN CONDA CPAN CRAN DART GIT GO_MOD GO_DEP GO_VNDR GO_VENDOR GO_GRADLE GRADLE HEX IVY LERNA MAVEN NPM NUGET PACKAGIST PEAR PIP PNPM POETRY RUBYGEMS SBT SETUPTOOLS SWIFT YARN CLANG XCODE OPAM UV RUSH".split())
+              settings = {"DETECT_TIMEOUT": str(int(os.environ["INPUT_TIMEOUT"]))}
+              # Wheel scans own the interpreter, project and detector selection.
+              python_owned = {
+                  "detect.included.detector.types", "detect.excluded.detector.types",
+                  "detect.required.detector.types", "detect.detector.search.depth",
+                  "detect.accuracy.required",
+                  "detect.pip.project.name", "detect.pip.project.version.name", "detect.pip.only.project.tree",
+              }
+              if os.environ.get("INPUT_PYTHON_WHEELS_ARTIFACT") and python_owned.intersection(properties):
+                  raise ValueError("property conflicts with prepared Python environment")
+              if os.environ["RESOLVED_MODE"] == "persistent":
+                  settings["DETECT_WAIT_FOR_RESULTS"] = "true"
+              if os.environ.get("INPUT_SNIPPET_SCAN") == "true":
+                  settings["DETECT_BLACKDUCK_SIGNATURE_SCANNER_SNIPPET_MATCHING"] = "SNIPPET_MATCHING"
+              for name, value in properties.items():
+                  if name in strings:
+                      if not isinstance(value, str) or not value or len(value) > 512:
+                          raise ValueError("invalid string")
+                      if any(not (character.isascii() and (character.isalnum() or character in "_.,/*?+@ -"))
+                             for character in value):
+                          raise ValueError("invalid characters")
+                  elif name in booleans:
+                      if not isinstance(value, bool):
+                          raise ValueError("not a boolean")
+                  elif name == "detect.detector.search.depth":
+                      if type(value) is not int or not 0 <= value <= 100:
+                          raise ValueError("invalid search depth")
+                  elif name in full_only:
+                      if os.environ["RESOLVED_MODE"] != "persistent":
+                          raise ValueError("full-scan property in RAPID")
+                      choices = full_only[name]
+                      if choices is None:
+                          if type(value) is not int or not 1 <= value <= 65536:
+                              raise ValueError("invalid scanner memory")
+                      elif name.endswith(("license.search", "copyright.search")):
+                          if not isinstance(value, bool):
+                              raise ValueError("not a boolean")
+                      elif not isinstance(value, str) or value not in choices:
+                          raise ValueError("invalid enum")
+                  else:
+                      raise ValueError("unsupported property")
+                  if name.endswith("detector.types") or name == "detect.accuracy.required":
+                      allowed = detector_types | ({"ALL", "NONE"} if name == "detect.accuracy.required" else set())
+                      if not set(value.split(",")) <= allowed:
+                          raise ValueError("invalid detector list")
+                  if name == "detect.npm.dependency.types.excluded" \
+                          and not set(value.split(",")) <= {"NONE", "DEV", "PEER", "OPTIONAL"}:
+                      raise ValueError("invalid NPM dependency type")
+                  settings[name.upper().replace(".", "_")] = str(value).lower() if isinstance(value, bool) else str(value)
+              destination = Path(os.environ["RUNNER_TEMP"]) / "pulse-oss-detect.env"
+              destination.write_text("".join(f"{key}={value}\n" for key, value in sorted(settings.items())), encoding="utf-8")
+              destination.chmod(0o600)
+          except (ValueError, TypeError):
+              raise SystemExit("::error::detect_properties must contain only supported names and typed values. See the scan guide.") from None
+          PY
+
           # Private Docker config, so the registry login can be destroyed on its own.
           docker_config="$RUNNER_TEMP/pulse-oss-docker"
           install -d -m 700 "$docker_config"
@@ -325,6 +478,11 @@ jobs:
             | sed -e 's/-\{2,\}/-/g' -e 's/^-//' -e 's/-$//')"
           if [[ -z "$slug" || "$slug" == "." ]]; then
             slug=root
+          fi
+          # Runtime variants can inspect the same source path in parallel.
+          if [[ -n "${INPUT_PYTHON_WHEELS_ARTIFACT:-}" ]]; then
+            variant="$(printf '%s\n' "$INPUT_PYTHON_WHEELS_ARTIFACT" "$INPUT_PYTHON_PROJECT" | sha256sum | cut -c1-12)"
+            slug="$slug-$variant"
           fi
           printf 'artifact_slug=%s\n' "$slug" >> "$GITHUB_OUTPUT"
 
@@ -372,7 +530,7 @@ jobs:
           INPUT_SCAN_PATH: ${{ inputs.scan_path }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import os
           from pathlib import Path
 
@@ -380,6 +538,7 @@ jobs:
           raw = os.environ["INPUT_SCAN_PATH"].strip()
 
           def fail(message):
+              """Reject unsafe scan roots without evaluating repository code."""
               raise SystemExit(f"::error::{message}")
 
           if not raw:
@@ -417,6 +576,80 @@ jobs:
 
       # Audience here is Vault's, not Charon's — each request mints its own token, so both
       # identities live under the single id-token: write grant.
+      - name: Download Python runtime wheels
+        if: inputs.python_wheels_artifact != ''
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: ${{ inputs.python_wheels_artifact }}
+          path: ${{ runner.temp }}/pulse-oss-python-wheels
+
+      - name: Validate Python runtime wheels
+        if: inputs.python_wheels_artifact != ''
+        env:
+          WHEELHOUSE: ${{ runner.temp }}/pulse-oss-python-wheels
+          INPUT_PYTHON_PROJECT: ${{ inputs.python_project }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import configparser
+          import os
+          import re
+          import stat
+          import zipfile
+          from email.parser import BytesParser
+          from pathlib import Path, PurePosixPath
+
+          def normalized(name):
+              """Compare distribution names using Python package-name normalization."""
+              return re.sub(r"[-_.]+", "-", name).lower()
+
+          try:
+              root = Path(os.environ["WHEELHOUSE"])
+              wheels = list(root.iterdir())
+              if root.is_symlink() or not wheels:
+                  raise ValueError("empty or linked artifact")
+              projects = set()
+              for wheel in wheels:
+                  if wheel.is_symlink() or not wheel.is_file() or wheel.suffix != ".whl":
+                      raise ValueError("artifact must contain only flat wheel files")
+                  with zipfile.ZipFile(wheel) as archive:
+                      metadata = []
+                      for member in archive.infolist():
+                          path = PurePosixPath(member.filename)
+                          parts = path.parts
+                          if (not parts or path.is_absolute() or ".." in parts or "\\" in member.filename
+                                  or stat.S_ISLNK(member.external_attr >> 16)):
+                              raise ValueError("unsafe wheel member")
+                          if parts[0].endswith(".data"):
+                              if len(parts) < 3 or parts[1] not in {"purelib", "platlib"}:
+                                  raise ValueError("wheel scripts/data schemes are not supported")
+                              parts = parts[2:]
+                          if (parts[0].lower().split(".")[0] in {"pip", "venv", "ensurepip", "sitecustomize", "usercustomize"}
+                                  or path.name in {"sitecustomize.py", "usercustomize.py"}):
+                              raise ValueError("wheel changes Python startup or tooling")
+                          if path.name == "entry_points.txt":
+                              entries = configparser.ConfigParser()
+                              entries.read_string(archive.read(member).decode("utf-8"))
+                              for group in ("console_scripts", "gui_scripts"):
+                                  for name in entries[group] if entries.has_section(group) else ():
+                                      if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)
+                                              or name.lower().startswith(("pip", "python"))):
+                                          raise ValueError("wheel replaces a Python executable")
+                          if len(parts) == 2 and parts[0].endswith(".dist-info") and parts[1] == "METADATA":
+                              metadata.append(BytesParser().parsebytes(archive.read(member)))
+                      if len(metadata) != 1 or not metadata[0].get("Name"):
+                          raise ValueError("missing package identity")
+                      name = normalized(metadata[0]["Name"])
+                      if name in projects or name in {"pip", "setuptools", "wheel"}:
+                          raise ValueError("duplicate distribution or packaging-tool replacement")
+                      projects.add(name)
+              if normalized(os.environ["INPUT_PYTHON_PROJECT"]) not in projects:
+                  raise ValueError("selected project is absent from wheelhouse")
+          except (OSError, ValueError, KeyError, zipfile.BadZipFile, configparser.Error):
+              raise SystemExit("::error::Invalid wheel artifact: supply the selected project and its runtime wheels, without scripts or Python startup/tool replacements.") from None
+          print("Python runtime wheel artifact validated.")
+          PY
+
       - name: Import nvcr.io credentials from Vault
         uses: hashicorp/vault-action@4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b  # v3.4.0
         with:
@@ -442,7 +675,9 @@ jobs:
         id: image
         run: |
           set -euo pipefail
-          docker pull "$SCANNER_IMAGE_REF" >/dev/null
+          if ! docker image inspect "$SCANNER_IMAGE_REF" >/dev/null 2>&1; then
+            docker pull "$SCANNER_IMAGE_REF" >/dev/null
+          fi
           # Record the digest from the pulled image itself, not only from the reference.
           digest="${SCANNER_IMAGE_REF##*@}"
           repo_digests="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$SCANNER_IMAGE_REF")"
@@ -455,6 +690,77 @@ jobs:
       - name: Log out of nvcr.io
         if: always()
         run: docker logout nvcr.io >/dev/null 2>&1 || true
+
+      - name: Prepare Python scan environment
+        if: inputs.python_wheels_artifact != ''
+        env:
+          WHEELHOUSE: ${{ runner.temp }}/pulse-oss-python-wheels
+          INPUT_PYTHON_PROJECT: ${{ inputs.python_project }}
+        run: |
+          set -euo pipefail
+          umask 077
+          suffix="$(python3 -I -c 'import secrets; print(secrets.token_hex(6))')"
+          volume="pulse-oss-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$suffix"
+          prepare_container="$volume-setup"
+          environment_file="$(mktemp "$RUNNER_TEMP/pulse-oss-python.XXXXXX.env")"
+          {
+            printf 'PULSE_OSS_PYTHON_VOLUME=%s\n' "$volume"
+            printf 'PULSE_OSS_PYTHON_PREP_CONTAINER=%s\n' "$prepare_container"
+            printf 'PULSE_OSS_PYTHON_ENV_FILE=%s\n' "$environment_file"
+          } >> "$GITHUB_ENV"
+          docker volume create "$volume" >/dev/null
+          # Root can initialize the empty volume, but gets no capabilities, network,
+          # job identity or writable image/source. The actual scanner stays unprivileged.
+          if ! docker run --name "$prepare_container" --pull never \
+            --network none --read-only --user 0:0 \
+            --cap-drop=ALL --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=1g \
+            --env PYTHON_PROJECT="$INPUT_PYTHON_PROJECT" \
+            --volume "$WHEELHOUSE:/runtime-wheels:ro" \
+            --volume "$volume:/scan-python:rw" \
+            --entrypoint /opt/miniforge/bin/python \
+            -i "$SCANNER_IMAGE_REF" -I - >/dev/null 2>&1 <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          os.umask(0o022)
+          environment = {"PATH": "/opt/miniforge/bin:/usr/bin:/bin", "HOME": "/tmp",
+                         "LANG": "C.UTF-8", "TMPDIR": "/tmp", "PIP_CONFIG_FILE": "/dev/null"}
+          subprocess.run(["/opt/miniforge/bin/python", "-m", "venv", "/scan-python/venv"],
+                         env=environment, check=True, capture_output=True, timeout=120)
+          python = "/scan-python/venv/bin/python"
+          wheels = sorted(map(str, Path("/runtime-wheels").glob("*.whl")))
+          subprocess.run([python, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check",
+                          "install", "--no-index", "--no-cache-dir", "--only-binary=:all:", *wheels],
+                         env=environment, check=True, capture_output=True, timeout=300)
+          # Wheel installation does not execute .pth hooks. Remove them before
+          # starting another venv process, so inspection never runs package startup code.
+          for hook in Path("/scan-python/venv/lib").glob("python*/site-packages/*.pth"):
+              hook.unlink()
+          # Force one installed-project inspection, not unrelated sample requirements.
+          Path("/scan-python/runtime-requirements.txt").write_text("", encoding="utf-8")
+          subprocess.run([python, "-I", "-m", "pip", "check"], env=environment,
+                         check=True, capture_output=True, timeout=60)
+          subprocess.run([python, "-I", "-c", "from importlib.metadata import distribution; import sys; distribution(sys.argv[1])",
+                          os.environ["PYTHON_PROJECT"]], env=environment,
+                         check=True, capture_output=True, timeout=30)
+          PY
+          then
+            echo "::error::Python setup failed. Supply compatible Python 3.12 Linux amd64 wheels for the project and every runtime dependency; pip check must pass."
+            exit 1
+          fi
+          docker rm "$prepare_container" >/dev/null
+          {
+            echo 'DETECT_PYTHON_PATH=/scan-python/venv/bin/python'
+            echo 'DETECT_PIP_PATH=/scan-python/venv/bin/pip'
+            echo 'DETECT_INCLUDED_DETECTOR_TYPES=PIP'
+            echo 'DETECT_DETECTOR_SEARCH_DEPTH=0'
+            echo 'DETECT_PIP_REQUIREMENTS_PATH=/scan-python/runtime-requirements.txt'
+            echo 'DETECT_PIP_ONLY_PROJECT_TREE=true'
+            printf 'DETECT_PIP_PROJECT_NAME=%s\n' "$INPUT_PYTHON_PROJECT"
+          } > "$environment_file"
+          echo "Python scan environment prepared; runtime dependency checks passed."
 
       - name: Install Charon tunnel client
         uses: teleport-actions/setup@b638ff596557cc3959eb6b5287d5e58e0c8ac6a6  # v1
@@ -520,51 +826,50 @@ jobs:
           INPUT_BUILD: ${{ inputs.build }}
           INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+          INPUT_PYTHON_WHEELS_ARTIFACT: ${{ inputs.python_wheels_artifact }}
+          INPUT_DEBUG_LOGGING: ${{ inputs.debug_logging }}
+          INPUT_SHOW_CONSOLE: ${{ inputs.show_console }}
         run: |
           set -euo pipefail
           umask 077
-          output_dir="$RUNNER_TEMP/pulse-oss-scan"
-          mkdir -p "$output_dir"
+          output_dir="$(mktemp -d "$RUNNER_TEMP/pulse-oss-scan.XXXXXX")"
+          printf 'PULSE_OSS_OUTPUT_DIR=%s\n' "$output_dir" >> "$GITHUB_ENV"
           raw_log="$(mktemp "${RUNNER_TEMP}/pulse-oss-scanner.XXXXXX.log")"
+          printf 'PULSE_OSS_RAW_LOG=%s\n' "$raw_log" >> "$GITHUB_ENV"
           container_name="pulse-oss-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # The CLI rejects path separators here, so it writes into workdir /tmp instead.
           report_name="vulnerability-report.json"
 
-          # The scan needs a writable tree. Pulse reads its own status back out of
-          # <scan path>/bd_nspect, and Detect's SETUPTOOLS and UV detectors generate metadata
-          # next to every project they find — a read-only mount turns those into detector
-          # failures, which Detect reports as a non-zero status rather than as a partial scan.
-          # So the container gets a throwaway copy instead: the consumer's working tree is
-          # never mounted, and the scanner may write anywhere inside the copy. The permissions
-          # are open because the image runs unprivileged and copies in as the runner's uid, and
-          # Pulse walks the tree with du, which fails the whole scan on an unreadable directory.
+          # Detect writes metadata beside source files. Give its unprivileged user a
+          # writable copy, and register it before copying so failed setup is cleaned up.
           scan_root="$(mktemp -d "${RUNNER_TEMP}/pulse-oss-src.XXXXXX")"
+          printf 'PULSE_OSS_SCAN_ROOT=%s\n' "$scan_root" >> "$GITHUB_ENV"
           cp -a "$GITHUB_WORKSPACE/." "$scan_root/"
           chmod -R a+rwX "$scan_root"
+          # Never accept detailed status from the checkout or an earlier invocation.
+          host_scan_path="$scan_root${CONTAINER_SCAN_PATH#/workspace}"
+          rm -rf "$host_scan_path/bd_nspect"
+          # Keep the fresh status directory runner-owned for cross-user cleanup.
+          mkdir -m 777 "$host_scan_path/bd_nspect"
 
           {
-            printf 'PULSE_OSS_OUTPUT_DIR=%s\n' "$output_dir"
-            printf 'PULSE_OSS_RAW_LOG=%s\n' "$raw_log"
             printf 'PULSE_OSS_CONTAINER=%s\n' "$container_name"
-            printf 'PULSE_OSS_SCAN_ROOT=%s\n' "$scan_root"
           } >> "$GITHUB_ENV"
 
           # Findings never set the exit code: the CLI always runs --no-fail, and the enforce step
           # applies failure_policy to the validated report. Under --fail the CLI exits 1 for
           # findings and for a failed scan alike, leaving only log text to tell them apart.
 
-          # The same registration identity is supplied twice, as flags and as PULSE_* in the
-          # container environment, because the two scanner generations do not agree on which
-          # one they read: the build that was green on 2026-09-30 honoured the flags, and
-          # newer builds reject the same registration unless the environment is set as well.
-          # Passing both keeps either generation working. Matches how the reference harness
-          # in nSpect-github-first-poc-test-1 invokes the CLI.
+          # Pulse reads registration identity from both flags and environment variables.
           export PULSE_CHARON_URL="http://127.0.0.1:${CHARON_LOCAL_PORT}"
 
           command=(
-            pulse --no-echo --no-color --timeout "$INPUT_TIMEOUT"
+            pulse --no-echo --no-color --no-clean --timeout "$INPUT_TIMEOUT"
             --charon-url "$PULSE_CHARON_URL"
           )
+          if [[ "$INPUT_DEBUG_LOGGING" == true ]]; then
+            command+=(--log-level debug)
+          fi
           if [[ -n "$INPUT_NSPECT_ID" ]]; then
             export PULSE_NSPECT_ID="$INPUT_NSPECT_ID"
             export PULSE_REPO_URL="ssh://git@github.com/${GITHUB_REPOSITORY}.git"
@@ -601,16 +906,24 @@ jobs:
           fi
           command+=("$CONTAINER_SCAN_PATH")
 
+          python_runtime=()
+          if [[ -n "$INPUT_PYTHON_WHEELS_ARTIFACT" ]]; then
+            python_runtime=(--env-file "$PULSE_OSS_PYTHON_ENV_FILE"
+                            --volume "$PULSE_OSS_PYTHON_VOLUME:/scan-python:ro")
+          fi
+
           # --network host is required: the scanner reaches Charon over the loopback tunnel.
           # The scan reads a dependency tree an untrusted contributor controls, so the
           # container gets no capabilities and cannot acquire any. The only thing it can
           # write to is the throwaway copy above.
           docker create \
+            "${python_runtime[@]}" \
             --name "$container_name" \
             --network host \
             --workdir /tmp \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
+            --env-file "$RUNNER_TEMP/pulse-oss-detect.env" \
             --env ACTIONS_ID_TOKEN_REQUEST_URL \
             --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             --env CI=true \
@@ -628,36 +941,104 @@ jobs:
           scanner_status=$?
           set -e
 
-          docker cp "$container_name:/tmp/$report_name" \
-            "$output_dir/$report_name" >/dev/null 2>&1 || true
+          report_copied=false
+          status_copied=false
+          if docker cp "$container_name:/tmp/$report_name" \
+            "$output_dir/$report_name" >/dev/null 2>&1; then report_copied=true; fi
+          if docker cp "$container_name:$CONTAINER_SCAN_PATH/bd_nspect/status.json" \
+            "$output_dir/detect-status.json" >/dev/null 2>&1; then status_copied=true; fi
 
           # Keep a redacted copy of the scanner's output whatever the exit status. A scanner
           # can exit 0 and still leave no usable report, and this is then the only evidence.
+          # Run outside the checkout, without caller Python modules or user-site imports.
+          cd "$RUNNER_TEMP"
           RAW_LOG="$raw_log" OUTPUT_DIR="$output_dir" \
             SENSITIVE_NSPECT_ID="$INPUT_NSPECT_ID" SENSITIVE_SBOM_NAME="$INPUT_SBOM_NAME" \
-            python3 - <<'PY'
+            env -u PYTHONPATH -u PYTHONHOME PYTHONNOUSERSITE=1 python3 - <<'PY'
+          import json
           import os
           import re
           from pathlib import Path
+          from urllib.parse import unquote, urlsplit, urlunsplit
 
           raw = Path(os.environ["RAW_LOG"]).read_text(encoding="utf-8", errors="replace")
-          for value in (
+          sensitive_values = (
               os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", ""),
               os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""),
               os.environ.get("SENSITIVE_NSPECT_ID", ""),
               os.environ.get("SENSITIVE_SBOM_NAME", ""),
               os.environ.get("SCANNER_IMAGE_REF", ""),
-          ):
-              if value:
-                  raw = raw.replace(value, "[REDACTED]")
+          )
+
+          def mask_known_values(text):
+              """Remove configured private values before and after log decoding."""
+              for value in sensitive_values:
+                  if value:
+                      text = text.replace(value, "[REDACTED]")
+              return text
+
+          raw = mask_known_values(raw)
 
           secret_key = (
               r"(?:authorization|proxy[_ .-]?authorization|cookie|set[_ .-]?cookie|"
               r"x-charon-gha-token|"
-              r"(?:[a-z0-9_-]+[.])?api[._ -]?token|access[._ -]?token|id[._ -]?token|"
-              r"ssa[._ -]?token|client[._ -]?secret|password)"
+              r"(?:[a-z0-9_-]+[.])?api[._ -]?(?:token|key)|(?:x[._ -]?)?api[._ -]?key|"
+              r"access[._ -]?token|id[._ -]?token|refresh[._ -]?token|"
+              r"ssa[._ -]?token|client[._ -]?secret|token|secret|password)"
           )
           auth_scheme = r"(?:basic|bearer|token)"
+
+          def redact_literals(text):
+              """Consume complete structured credential values, including nested JSON."""
+              decoder = json.JSONDecoder()
+              assignment = re.compile(rf"(?i)(?:--)?[\"']?{secret_key}[\"']?\s*[:=]\s*")
+              pieces = []
+              cursor = 0
+              for match in assignment.finditer(text):
+                  start = match.end()
+                  if start < cursor or start == len(text):
+                      continue
+                  if re.match(r"\[REDACTED[A-Z_]*\](?=$|[\s\"',;}}\]])", text[start:]):
+                      continue
+                  if text[start] not in '{[\"\'':
+                      # Bare header values are opaque, not JSON number/bool prefixes.
+                      continue
+                  try:
+                      _, end = decoder.raw_decode(text, start)
+                      if not re.match(r"[ \t]*(?:[,}\]]|\r?\n|$)", text[end:]):
+                          raise ValueError("literal prefix is not a complete value")
+                      replacement = '"[REDACTED]"'
+                  except ValueError:
+                      quoted = re.match(r"'(?:[^'\\]|\\.)*'", text[start:])
+                      if quoted and re.match(r"[ \t]*(?:[,}\]]|\r?\n|$)", text[start + quoted.end():]):
+                          end = start + quoted.end()
+                          replacement = "'[REDACTED]'"
+                      elif text[start] in '{[\"\'':
+                          # An incomplete structured credential could continue on later
+                          # lines. Retain earlier errors, but never publish that remainder.
+                          pieces.append(text[cursor:start])
+                          pieces.append("[remaining output withheld: malformed credential value]\n")
+                          return "".join(pieces)
+                      else:
+                          continue
+                  pieces.extend((text[cursor:start], replacement))
+                  cursor = end
+              pieces.append(text[cursor:])
+              return "".join(pieces)
+
+          raw = redact_literals(raw)
+          # Decode debug separators only after valid quoted values were consumed.
+          # Preserve JSON quote/backslash escapes so strings cannot end prematurely.
+          for _ in range(3):
+              raw = unquote(raw)
+              raw = re.sub(r"\\u00([0-9a-fA-F]{2})",
+                           lambda m: m[0] if int(m[1], 16) in (34, 39, 92) else chr(int(m[1], 16)), raw)
+              raw = mask_known_values(raw)
+              raw = redact_literals(raw)
+          # Escaped keys outside valid JSON cannot be decoded safely as log text.
+          uncertain = re.search(rf"(?im)^.*(?:\\[\"']|\\u00(?:22|27|5c)).*{secret_key}.*$", raw)
+          if uncertain:
+              raw = raw[:uncertain.start()] + "[remaining output withheld: escaped credential field]\n"
           signed_url_key = (
               r"(?:token|access_token|id_token|jwt|sig|signature|key|secret|"
               r"x-amz-(?:signature|credential|security-token)|"
@@ -668,6 +1049,7 @@ jobs:
           boundary = r"(?:(?<![A-Za-z0-9_])|(?<=\\[nrt]))"
 
           def redact_value(match):
+              """Replace a header or cookie value while preserving useful context."""
               value = match.group(2)
               quote = value[0] if len(value) > 1 and value[0] in "\"'" and value[-1] == value[0] else ""
               return f"{match.group(1)}{quote}[REDACTED]{quote}"
@@ -695,6 +1077,19 @@ jobs:
           for pattern, replacement in patterns:
               raw = pattern.sub(replacement, raw)
 
+          def alias_url(match):
+              """Keep route/error context without publishing deployment authorities."""
+              try:
+                  url = urlsplit(match.group())
+                  return urlunsplit((url.scheme, "scanner.example", url.path, url.query, url.fragment))
+              except ValueError:
+                  return "[URL]"
+
+          raw = re.sub(r"(?:https?|ssh)://[^\s\"'<>]+", alias_url, raw, flags=re.IGNORECASE)
+          raw = re.sub(r"(?i)\b(?:[a-z0-9-]+\.)*(?:nvidia\.com|blackduck\.com|teleport\.sh)\b",
+                       "scanner.example", raw)
+          raw = re.sub(r"(?i)black[ _-]?duck", "open-source-scanner", raw)
+
           # Any position, quoted or not; whitespace stays inside each lookahead to skip redacted values.
           marker = r"[\"']?\[REDACTED[A-Z_]*\]"
           residual_patterns = (
@@ -707,6 +1102,8 @@ jobs:
               re.compile(rf"(?i){boundary}(?:set[-_]?)?cookie[\"']?[ \t]*[:=][ \t]*{marker}"
                          r"[^\r\n]*?[;,][ \t]*[\w.-]+="),
               re.compile(rf"(?i)[?&]{signed_url_key}=(?!\[REDACTED\])[^&#\s\"'<>)]+"),
+              re.compile(rf"(?i){boundary}[\"']?{secret_key}[\"']?[ \t]*[:=]"
+                         rf"(?![ \t]*[\"']?(?:{auth_scheme}[ \t]+)?\[REDACTED)[ \t]*\S"),
           )
           # Drop only matching lines so the remaining diagnostics stay visible.
           raw = "".join(
@@ -724,7 +1121,54 @@ jobs:
           destination.chmod(0o600)
           PY
 
+          if [[ "$INPUT_SHOW_CONSOLE" == true ]]; then
+            echo "::group::Scanner output (redacted)"
+            marker="$(python3 -I -c 'import secrets; print(secrets.token_hex(24))')"
+            echo "::stop-commands::$marker"
+            cat "$output_dir/scanner-failure.log"
+            printf '\n::%s::\n' "$marker"
+            echo "::endgroup::"
+          fi
+
           printf 'exit_code=%s\n' "$scanner_status" >> "$GITHUB_OUTPUT"
+          if [[ "$scanner_status" == 0 && ( "$report_copied" != true || "$status_copied" != true ) ]]; then
+            echo "::error::The scanner's current report or detailed status could not be collected."
+            exit 1
+          fi
+
+      - name: Verify prepared Python analysis
+        if: always() && inputs.python_wheels_artifact != '' && steps.scanner.outcome == 'success' && steps.scanner.outputs.exit_code == '0'
+        env:
+          CONTAINER_SCAN_PATH: ${{ steps.source.outputs.container_path }}
+          INPUT_PYTHON_PROJECT: ${{ inputs.python_project }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          try:
+              root = Path(os.environ["PULSE_OSS_SCAN_ROOT"]) / os.environ["CONTAINER_SCAN_PATH"].removeprefix("/workspace").lstrip("/")
+              status = json.loads((root / "bd_nspect/status.json").read_text())
+              expected = {"detect.python.path": "/scan-python/venv/bin/python",
+                          "detect.pip.path": "/scan-python/venv/bin/pip",
+                          "detect.included.detector.types": "PIP",
+                          "detect.detector.search.depth": "0",
+                          "detect.pip.requirements.path": "/scan-python/runtime-requirements.txt",
+                          "detect.pip.only.project.tree": "true",
+                          "detect.pip.project.name": os.environ["INPUT_PYTHON_PROJECT"]}
+              detectors = status.get("detectors", [])
+              if (any(status.get("propertyValues", {}).get(key) != value for key, value in expected.items())
+                      or status.get("issues", []) or not detectors
+                      or not all(item.get("detectorType") == "PIP" and item.get("status") == "SUCCESS"
+                                 and item.get("detectorAccuracy") == "HIGH" and item.get("extracted") is True
+                                 for item in detectors)):
+                  raise ValueError("prepared runtime was not inspected")
+          except (OSError, ValueError, TypeError, AttributeError):
+              raise SystemExit("::error::Detect did not confirm complete Python inspection using the prepared environment.") from None
+          print("Detect confirmed the prepared Python environment and successful installed-package inspection.")
+          PY
 
       # Log text may only make a result stricter. It names the cause of a failure, or catches
       # a backend failure the CLI exited 0 on; it never turns a non-zero exit into a pass.
@@ -735,9 +1179,10 @@ jobs:
           SCANNER_STATUS: ${{ steps.scanner.outputs.exit_code }}
         run: |
           set -euo pipefail
-          RAW_LOG="$PULSE_OSS_RAW_LOG" OUTPUT_DIR="$PULSE_OSS_OUTPUT_DIR" python3 - <<'PY'
+          RAW_LOG="$PULSE_OSS_RAW_LOG" OUTPUT_DIR="$PULSE_OSS_OUTPUT_DIR" python3 -I - <<'PY'
           import json
           import os
+          import re
           from pathlib import Path
 
           raw = Path(os.environ["RAW_LOG"]).read_text(
@@ -772,6 +1217,13 @@ jobs:
                   break
           policy = any(marker in raw for marker in policy_markers)
           backend = any(marker in raw for marker in backend_markers)
+          code_suffixes = re.findall(
+              r"(?:rapid|stateless) scan is failed with status code([^\r\n]*)", raw)
+          # Only Detect's known policy result is non-operational. Generic policy text
+          # must never excuse another scanner/request code or a failure without a code.
+          backend_failure = backend and (not code_suffixes or any(
+              re.fullmatch(r"[:=\s]*3\.?\s*", suffix) is None for suffix in code_suffixes))
+          policy = policy or bool(code_suffixes and not backend_failure)
 
           status = exit_code
           if exit_code != 0:
@@ -781,7 +1233,7 @@ jobs:
                   category = "downstream-scan-error"
               else:
                   category = "scanner-error"
-          elif backend and not policy:
+          elif backend_failure:
               category = "downstream-scan-error"
               status = 70
           elif policy:
@@ -808,28 +1260,76 @@ jobs:
             excerpt="$(grep -m1 -iE '^[[:space:]]*error[: ]' "$failure_log" || true)"
             [[ -n "$excerpt" ]] \
               || excerpt="$(grep -v '^[[:space:]]*$' "$failure_log" | tail -n 1 || true)"
-            [[ -z "$excerpt" ]] \
-              || echo "::error::Scanner: ${excerpt:0:500}"
+            # Escape annotation syntax; print the remaining log with commands disabled.
+            annotation="${excerpt:0:500}"
+            annotation="${annotation//%/%25}"
+            annotation="${annotation//$'\r'/%0D}"
+            annotation="${annotation//$'\n'/%0A}"
+            echo "::error::Scanner: $annotation"
             echo "::group::Sanitized scanner output (last 40 lines)"
+            marker="$(python3 -I -c 'import secrets; print(secrets.token_hex(24))')"
+            echo "::stop-commands::$marker"
+            [[ -z "$excerpt" ]] || printf '%s\n' "${excerpt:0:500}"
             tail -n 40 "$failure_log" || true
+            printf '\n::%s::\n' "$marker"
             echo "::endgroup::"
           fi
+
+      - name: Validate detailed analysis status
+        id: analysis
+        if: always() && steps.classify.outputs.effective_status == '0'
+        env:
+          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
+          CONTAINER_SCAN_PATH: ${{ steps.source.outputs.container_path }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          try:
+              status = json.loads((Path(os.environ["PULSE_OSS_OUTPUT_DIR"]) / "detect-status.json").read_text())
+              fields = ("status", "detectors", "operations", "overallStatus", "issues")
+              if (not isinstance(status, dict)
+                      or any(not isinstance(status.get(key), list) for key in fields)
+                      or not all(status[key] for key in ("status", "operations", "overallStatus"))):
+                  raise ValueError("incomplete")
+              if (any(not isinstance(item, dict) or item.get("status") != "SUCCESS"
+                      for item in status["status"] + status["operations"])
+                      or any(not isinstance(item, dict) or item.get("status") not in ("SUCCESS", "ATTEMPTED")
+                             for item in status["detectors"])
+                      or any(not isinstance(item, dict) or item.get("key") not in ("SUCCESS", "FAILURE_POLICY_VIOLATION")
+                             for item in status["overallStatus"])
+                      or any(not isinstance(item, dict) or item.get("type") == "EXCEPTION" for item in status["issues"])):
+                  raise ValueError("analysis failure")
+              if os.environ.get("INPUT_SNIPPET_SCAN") == "true":
+                  root = os.environ["CONTAINER_SCAN_PATH"].rstrip("/") or "/"
+                  signature_keys = {"SIGNATURE_SCAN", f"Signature scan on {root}",
+                                    f"Signature scan / Snippet scan on {root}"}
+                  if not any(item.get("key") in signature_keys for item in status["status"]):
+                      raise ValueError("signature scan missing for the selected root")
+          except (OSError, ValueError, TypeError):
+              raise SystemExit("::error::Fresh Detect status is missing, incomplete or failed. A report alone is not a completed scan.") from None
+          print("Detailed Detect status confirms completed analysis.")
+          PY
 
       - name: Validate scan report
         id: report
         # A failed scanner leaves no report worth reading, so validating it would only report
         # the symptom and bury the cause.
-        if: always() && steps.classify.outputs.effective_status == '0'
+        if: always() && steps.classify.outcome == 'success' && steps.classify.outputs.effective_status == '0' && steps.analysis.outcome == 'success'
         env:
           INPUT_NSPECT_ID: ${{ inputs.nspect_id }}
         run: |
           set -euo pipefail
-          OUTPUT_DIR="$PULSE_OSS_OUTPUT_DIR" python3 - <<'PY'
+          OUTPUT_DIR="$PULSE_OSS_OUTPUT_DIR" python3 -I - <<'PY'
           import json
           import os
           import re
           from collections import Counter
           from pathlib import Path
+          from urllib.parse import unquote, urlsplit, urlunsplit
 
           report = Path(os.environ["OUTPUT_DIR"]) / "vulnerability-report.json"
           diagnostic = Path(os.environ["OUTPUT_DIR"]) / "report-diagnostic.json"
@@ -837,10 +1337,12 @@ jobs:
           # Structure only — never values. A rejected report is the one thing a live scan
           # cannot be re-run to inspect, and the raw file may not have been credential-scanned.
           def describe(**fields):
+              """Record structural failure evidence without report values or credentials."""
               diagnostic.write_text(json.dumps(fields, indent=2, sort_keys=True), encoding="utf-8")
               diagnostic.chmod(0o600)
 
           def publish(safe):
+              """Permit rejected-report publication only after its credential check."""
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
                   handle.write(f"report_safe={'true' if safe else 'false'}\n")
 
@@ -860,20 +1362,23 @@ jobs:
 
           jwt_value = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
                                  r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")
-          bearer_value = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+          bearer_value = re.compile(r"\b(?:basic|bearer|token)\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
           signed_url = re.compile(
               r"[?&](?:token|access_token|id_token|jwt|sig|signature|"
-              r"x-amz-(?:signature|credential|security-token))=", re.IGNORECASE)
+              r"x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential)|"
+              r"x-ms-(?:sig|signature|se)|key|secret)=", re.IGNORECASE)
           sensitive_key = re.compile(
               r"(^|_)(authorization|proxy_authorization|cookie|set_cookie|api_key|api_token|"
               r"token|secret|access_token|id_token|refresh_token|client_secret|password|"
               r"credential|x_charon_gha_token)($|_)")
 
           def normalized_key(value):
+              """Recognize credential keys across supported naming conventions."""
               value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
               return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower()
 
           def inspect(value):
+              """Fail closed on credential-shaped fields or values throughout a report."""
               if isinstance(value, dict):
                   for key, child in value.items():
                       if sensitive_key.search(normalized_key(str(key))):
@@ -883,11 +1388,12 @@ jobs:
               elif isinstance(value, list):
                   for child in value:
                       inspect(child)
-              elif isinstance(value, str) and (jwt_value.search(value)
-                                               or bearer_value.search(value)
-                                               or signed_url.search(value)):
-                  raise SystemExit(
-                      "::error::The scan report contains a credential-like value.")
+              elif isinstance(value, str):
+                  for _ in range(3):
+                      value = unquote(value)
+                      value = re.sub(r"\\u00([0-9a-fA-F]{2})", lambda m: chr(int(m[1], 16)), value)
+                  if jwt_value.search(value) or bearer_value.search(value) or signed_url.search(value):
+                      raise SystemExit("::error::The scan report contains a credential-like value.")
 
           try:
               inspect(payload)
@@ -895,6 +1401,29 @@ jobs:
               describe(exists=True, bytes=len(raw), parsed=True, credential_scan="failed")
               publish(False)
               raise
+
+          def abstract(value):
+              """Keep report structure and findings while removing deployment destinations."""
+              if isinstance(value, dict):
+                  return {key: abstract(child) for key, child in value.items()}
+              if isinstance(value, list):
+                  return [abstract(child) for child in value]
+              if not isinstance(value, str):
+                  return value
+              def alias_url(match):
+                  """Preserve URL paths but replace identifying authorities."""
+                  try:
+                      url = urlsplit(match.group())
+                      return urlunsplit((url.scheme, "scanner.example", url.path, url.query, url.fragment))
+                  except ValueError:
+                      return "[URL]"
+              value = re.sub(r"(?:https?|ssh)://[^\s\"'<>]+", alias_url, value, flags=re.IGNORECASE)
+              return re.sub(r"(?i)\b(?:[a-z0-9-]+\.)*(?:nvidia\.com|blackduck\.com|teleport\.sh)\b",
+                            "scanner.example", value)
+
+          payload = abstract(payload)
+          report.write_text(json.dumps(payload, ensure_ascii=True) + "\n", encoding="utf-8")
+          report.chmod(0o600)
 
           # Past the credential scan the payload is safe to publish for diagnosis.
           publish(True)
@@ -921,6 +1450,14 @@ jobs:
 
           findings = None
           unfiltered = None
+          if isinstance(payload, dict):
+              if "filtered" in payload or "raw" in payload:
+                  if (not all(isinstance(payload.get(key), list) for key in ("raw", "filtered"))
+                          or any(key in payload for key in ("Data", "data", "vulnerabilities", "items", "results"))):
+                      raise SystemExit("::error::The report envelope is incomplete or mixes incompatible schemas.")
+              for key in ("status", "scanStatus", "overallStatus"):
+                  if key in payload and str(payload[key]).upper() not in ("SUCCESS", "COMPLETED", "COMPLETE"):
+                      raise SystemExit("::error::The report does not describe a completed scan.")
           if isinstance(payload, list):
               findings = payload
           elif isinstance(payload, dict):
@@ -952,7 +1489,11 @@ jobs:
                   continue
               for key, value in finding.items():
                   if normalized_key(str(key)).endswith("severity") and isinstance(value, str):
-                      severities[value.strip().lower() or "unspecified"] += 1
+                      level = value.strip().lower() or "unspecified"
+                      if level not in {"critical", "high", "medium", "moderate", "low", "negligible",
+                                       "info", "informational", "unknown", "unspecified"}:
+                          level = "other"
+                      severities[level] += 1
                       break
           breakdown = ", ".join(
               f"{name}: {count}" for name, count in sorted(severities.items())
@@ -1008,7 +1549,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pulse-oss-scan-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pulse-oss-scan/vulnerability-report.json
+          path: ${{ env.PULSE_OSS_OUTPUT_DIR }}/vulnerability-report.json
           if-no-files-found: error
           retention-days: 3
 
@@ -1019,28 +1560,28 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pulse-oss-report-diagnostic-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pulse-oss-scan/report-diagnostic.json
+          path: ${{ env.PULSE_OSS_OUTPUT_DIR }}/report-diagnostic.json
           if-no-files-found: warn
           retention-days: 3
 
       # Only once the credential scan has passed; an unparsable report never reached it.
       - name: Upload rejected report
-        if: always() && steps.report.outcome == 'failure' && steps.report.outputs.report_safe == 'true'
+        if: always() && inputs.upload_report && steps.report.outcome == 'failure' && steps.report.outputs.report_safe == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pulse-oss-rejected-report-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pulse-oss-scan/vulnerability-report.json
+          path: ${{ env.PULSE_OSS_OUTPUT_DIR }}/vulnerability-report.json
           if-no-files-found: warn
           retention-days: 3
 
       - name: Upload sanitized failure diagnostics
-        if: always() && (steps.classify.outputs.effective_status != '0' || steps.report.outcome == 'failure')
+        if: always() && (steps.classify.outputs.effective_status != '0' || steps.analysis.outcome == 'failure' || steps.report.outcome == 'failure')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pulse-oss-scan-failure-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/pulse-oss-scan/scanner-status.json
-            ${{ runner.temp }}/pulse-oss-scan/scanner-failure.log
+            ${{ env.PULSE_OSS_OUTPUT_DIR }}/scanner-status.json
+            ${{ env.PULSE_OSS_OUTPUT_DIR }}/scanner-failure.log
           if-no-files-found: warn
           retention-days: 3
 
@@ -1070,8 +1611,7 @@ jobs:
             echo "::error::The scan did not produce a safe, valid report."
             exit 1
           fi
-          # A policy violation needs findings to account for it, before or after exceptions;
-          # without any, a pass would rest on log text rather than on the report.
+          # Keep the existing fail-closed policy when a backend violation has no findings.
           if [[ "$DIAGNOSTIC_CATEGORY" == vulnerability-policy ]] \
             && (( ${UNFILTERED_COUNT:-$FINDING_COUNT} == 0 )); then
             echo "::error::The scanner reported a policy violation, but the validated report holds no findings to account for it, so the result is not a pass."
@@ -1090,16 +1630,39 @@ jobs:
       - name: Remove temporary scanner state
         if: always()
         run: |
+          set -uo pipefail
+          cleanup_failed=0
           if [[ -n "${PULSE_OSS_TBOT_PID:-}" ]]; then
             kill "$PULSE_OSS_TBOT_PID" 2>/dev/null || true
             wait "$PULSE_OSS_TBOT_PID" 2>/dev/null || true
           fi
-          [[ -z "${PULSE_OSS_CONTAINER:-}" ]] \
-            || docker rm --force "$PULSE_OSS_CONTAINER" >/dev/null 2>&1 || true
-          docker image rm --force "$SCANNER_IMAGE_REF" >/dev/null 2>&1 || true
-          rm -f "${PULSE_OSS_TBOT_CONFIG:-}" "${PULSE_OSS_TBOT_LOG:-}" "${PULSE_OSS_RAW_LOG:-}"
-          [[ -z "${DOCKER_CONFIG:-}" ]] || rm -rf "$DOCKER_CONFIG"
-          # The scan copy is disposable and lives under RUNNER_TEMP, never in the caller's
-          # working tree, so it goes away whole.
-          [[ -z "${PULSE_OSS_SCAN_ROOT:-}" ]] \
-            || rm -rf "$PULSE_OSS_SCAN_ROOT" 2>/dev/null || true
+          if [[ -n "${PULSE_OSS_CONTAINER:-}" ]]; then
+            docker rm --force "$PULSE_OSS_CONTAINER" >/dev/null 2>&1 || cleanup_failed=1
+            remaining="$(docker container ls --all --filter "name=^/${PULSE_OSS_CONTAINER}$" --format '{{.Names}}')" \
+              || cleanup_failed=1
+            [[ -z "$remaining" ]] || cleanup_failed=1
+          fi
+          # Keep the verified immutable image cached; it contains no per-job credentials.
+          for path in "${PULSE_OSS_TBOT_CONFIG:-}" "${PULSE_OSS_TBOT_LOG:-}" \
+            "${PULSE_OSS_RAW_LOG:-}" "${DOCKER_CONFIG:-}" "${PULSE_OSS_SCAN_ROOT:-}" \
+            "$RUNNER_TEMP/pulse-oss-detect.env" "${PULSE_OSS_OUTPUT_DIR:-}" \
+            "${PULSE_OSS_PYTHON_ENV_FILE:-}" "$RUNNER_TEMP/pulse-oss-python-wheels"; do
+            [[ -n "$path" ]] || continue
+            if [[ "$path" != "$RUNNER_TEMP/"* || "$path" == *"/../"* ]]; then
+              echo "::error::Refusing cleanup outside the job's temporary directory."
+              cleanup_failed=1
+              continue
+            fi
+            rm -rf -- "$path" || cleanup_failed=1
+          done
+          # Remove the setup container before its private Python environment volume.
+          if [[ -n "${PULSE_OSS_PYTHON_VOLUME:-}" ]]; then
+            if docker container inspect "$PULSE_OSS_PYTHON_PREP_CONTAINER" >/dev/null 2>&1; then
+              docker rm --force "$PULSE_OSS_PYTHON_PREP_CONTAINER" >/dev/null || cleanup_failed=1
+            fi
+            docker volume rm "$PULSE_OSS_PYTHON_VOLUME" >/dev/null || cleanup_failed=1
+          fi
+          if (( cleanup_failed )); then
+            echo "::error::Temporary scanner state was not fully removed."
+            exit 1
+          fi
