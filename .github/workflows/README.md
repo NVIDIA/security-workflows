@@ -102,6 +102,12 @@ jobs:
       # vuln-inventory-writeback: true            # persistent scans only; needs vuln-sbom-name
       # vuln-upload-report: true
       # vuln-timeout-seconds: 1800
+      # vuln-python-wheels-artifact: ''           # set with vuln-python-project
+      # vuln-python-project: ''
+      # vuln-snippet-scan: false                  # registered full releases; write-back must be false
+      # vuln-detect-properties: '{}'              # typed JSON allowlist
+      # vuln-show-console: false                  # redacted output only
+      # vuln-debug-logging: false
       # malware-runs-on: linux-amd64-cpu4
       # malware-failure-policy: malicious-only
       # malware-upload-report: true
@@ -155,6 +161,9 @@ jobs:
 
 ### Vulnerability scan (SCA) — [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml)
 
+See the [vulnerability scan guide](../../docs/vuln-scan/README.md) for scan modes,
+build preparation, snippets, Detect properties, diagnostics and validation limits.
+
 Runs NVIDIA's **Pulse OSS scanner** against the dependency graph under `scan_path` and reports findings to the **nSpect** vulnerability backend, so they become findings of record rather than only CI output.
 The scanner is pulled from `nvcr.io` and reaches nSpect through a Charon application tunnel on loopback. **GitHub OIDC is the only identity presented** — no service account, registry credential, or backend token enters the job. The scanner image is **pinned by digest inside the workflow** (the approved `charon-stable` release), so a caller cannot substitute another image, and every run records the digest it executed in the job summary and the `scanner_image_digest` output. A scanner upgrade is a digest change in this repository. The container runs with no capabilities, cannot acquire any, and never sees your checkout: it is given a disposable copy, which is discarded when the job ends. The copy is writable, because Detect's language detectors generate metadata next to each project they find and a read-only tree turns those into scan failures.
 
@@ -177,11 +186,32 @@ Behaviours to know about before you point it at a path:
 
 `failure_policy` decides only whether *findings* fail the job — the scan always produces the full report. `report-only` (default) warns; `fail-on-vulnerability` blocks on any finding. **Scanner, transport, and report-validation failures block under both**: a missing, malformed, or credential-bearing report is never a pass. The CLI always runs with `--no-fail` and the policy is applied to the validated report, so a non-zero scanner exit is always a failed scan — no finding message in the log can turn it into a pass. **Start on `report-only`** — turning on `fail-on-vulnerability` in an established repository blocks everything on day one over pre-existing findings. Triage first, then flip.
 
-`scan_mode: auto` runs a `persistent` scan (which creates or updates project state in the backend) only on `registered_branch`, and a stateless `rapid` scan everywhere else. Pass `rapid` explicitly where backend state is not wanted at all. Set `build: true` for **Maven** and **Go**, whose dependency graphs resolve only through a build.
+`scan_mode: auto` runs a `persistent` scan (which creates or updates project state in the backend) only on `registered_branch` with an nSpect ID, and a stateless `rapid` scan everywhere else. Pass `rapid` explicitly where backend state is not wanted at all. Set `build: true` for **Maven** and **Go**, whose dependency graphs resolve only through a build.
+
+Persistent scans set `detect.wait.for.results=true`. `snippet_scan: true` is for
+registered full releases only and requires `inventory_writeback: false`; PR scans
+remain RAPID-only. Binary and signature-only STATELESS modes are not exposed.
+A backend policy violation without reported findings, including a license-only
+violation, is refused rather than passed; the enforcement contract above is unchanged.
 
 Results are the run's job summary plus, with `upload_report: true`, a 3-day artifact. **SARIF publication is a follow-up**, so unlike the secret scan these findings do not appear under code scanning yet.
 
 Key inputs: `nspect_id` (optional — empty runs unregistered), `runs-on` (default `linux-amd64-cpu4`), `registered_branch` (default `main`), `sbom_name` (optional — selects the registration when `registered_branch` has more than one SBOM entry; needs `nspect_id`, required with `inventory_writeback`), `scan_path` (default `.`), `scan_mode` (default `auto`), `build` (default `false`), `failure_policy` (default `report-only`), `inventory_writeback` (default `false`, persistent scans only), `upload_report` (default `false`), `timeout_seconds` (default `1800`, range 60–3600).
+
+Optional controls, also forwarded by the suite under hyphenated `vuln-` names:
+
+| Input | Default | Purpose / limits |
+| --- | --- | --- |
+| `python_wheels_artifact` | empty | Same-run artifact with all intended runtime wheels for Python 3.12 / Linux amd64. Requires `python_project`, `build: false` and the `registered_branch` ref, never a PR mirror. |
+| `python_project` | empty | Installed distribution to inspect in the separate, offline-prepared runtime, read-only during scanning. `.pth` hooks are removed before checks; no native GPU build. |
+| `snippet_scan` | `false` | Snippet matching for registered full releases only; `inventory_writeback: false` is required. |
+| `detect_properties` | `{}` | Typed JSON allowlist. Cannot override workflow-owned settings or prepared-Python detector selection, root or project settings. |
+| `show_console` | `false` | Redacted scanner console output with mandatory service-destination abstraction. |
+| `debug_logging` | `false` | Pulse DEBUG logging; use with `show_console`. No raw diagnostic ZIP support or unmasking option. |
+
+The guide contains the [wheel artifact example](../../docs/vuln-scan/README.md#python-projects)
+and [supported property table](../../docs/vuln-scan/README.md#detect-property-allowlist).
+
 Outputs: `resolved_mode`, `finding_count`, `scanner_exit_code`, `scanner_image_digest`.
 
 ```yaml
