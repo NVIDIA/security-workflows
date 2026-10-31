@@ -127,6 +127,7 @@ for this repository's own self-tests.
 ### Secret scan — [`secret-scan-pulse.yml`](secret-scan-pulse.yml)
 
 CI enforcement lane. Runs the Pulse Secret Scanner container and publishes redacted SARIF to the repository Security tab.
+The filesystem scan covers checked-out files, not Git history. Its shallow checkout avoids downloading unrelated branch histories.
 The companion local-advisory lane is the `secret-scan-trufflehog`.
 **pre-commit hook** (open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog)) declared in [`.pre-commit-hooks.yaml`](../../.pre-commit-hooks.yaml).
 

@@ -32,6 +32,10 @@ Additive release. Existing suite callers need no change: `enable-vuln-scan` and 
 - Security suite — the preflight reports *every* missing companion input in one run rather than exiting on the first.
 - Pin policy — the recommended pre-commit `rev:` pin is now the 40-character commit SHA with the release tag as a `# frozen:` comment, the form `pre-commit autoupdate --freeze` writes, matching the SHA pin already required for reusable workflows. Existing release-tag pins keep working; switch with `pre-commit autoupdate --freeze` at the next refresh. See [Pin policy per surface](README.md#pin-policy-per-surface).
 
+### Fixed
+
+- Secret scan (Pulse): use a shallow checkout for the filesystem scan instead of downloading every branch and tag's history, avoiding large unrelated branches such as `gh-pages`.
+
 ### Known limitations
 
 - **SARIF publication is a follow-up.** Findings land in the job summary and an optional artifact, not the Security tab.
