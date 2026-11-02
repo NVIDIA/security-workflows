@@ -1087,6 +1087,12 @@ jobs:
           fi
           [[ -z "${PULSE_OSS_CONTAINER:-}" ]] \
             || docker rm --force "$PULSE_OSS_CONTAINER" >/dev/null 2>&1 || true
+          # Detectors write into the scan copy as the image's user; the runner cannot delete those files.
+          if [[ -n "${PULSE_OSS_SCAN_ROOT:-}" && -d "$PULSE_OSS_SCAN_ROOT" ]]; then
+            docker run --rm --network none --cap-drop=ALL --security-opt=no-new-privileges \
+              --entrypoint chmod --volume "$PULSE_OSS_SCAN_ROOT:/workspace" \
+              "$SCANNER_IMAGE_REF" -R a+rwX /workspace >/dev/null 2>&1 || true
+          fi
           docker image rm --force "$SCANNER_IMAGE_REF" >/dev/null 2>&1 || true
           rm -f "${PULSE_OSS_TBOT_CONFIG:-}" "${PULSE_OSS_TBOT_LOG:-}" "${PULSE_OSS_RAW_LOG:-}"
           [[ -z "${DOCKER_CONFIG:-}" ]] || rm -rf "$DOCKER_CONFIG"
