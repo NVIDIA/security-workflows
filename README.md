@@ -5,7 +5,7 @@
 
 Centrally maintained, reusable GitHub Actions workflows for the security-compliance scans rolled out by the NVIDIA GitHub-First initiative.
 
-This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It publishes two artifact types: **reusable GitHub Actions workflows** (`workflow_call`) under [`.github/workflows/`](.github/workflows/README.md) for job-level server-side enforcement, and **pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for local-advisory checks on the developer's machine. `secret-scan-trufflehog` downloads a pinned, SHA-256-verified TruffleHog release into pre-commit's isolated environment during hook installation, so consumers need no system scanner or shell installer. Both surfaces are pinned per the [surface-specific policy below](#pin-policy-per-surface).
+This repository is the single source of truth for the security-compliance machinery that powers pre-merge and pre-release security scanning across NVIDIA's GitHub repositories. It publishes two artifact types: **reusable GitHub Actions workflows** (`workflow_call`) under [`.github/workflows/`](.github/workflows/README.md) for job-level server-side enforcement, and **pre-commit hooks** declared in [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) and catalogued in [`hooks/`](hooks/README.md) for local-advisory checks on the developer's machine. Both surfaces are pinned per the [surface-specific policy below](#pin-policy-per-surface).
 
 Pre-commit and CI are complementary, not alternatives: pre-commit is local-advisory (best-effort, optimized for developer experience) and CI is server-side enforcement (authoritative, fail-closed). The CI surface is a reusable workflow (declared `permissions:`, isolated job) — the preferred shape for security gates. A scan category may ship the CI workflow, the pre-commit hook, or both, depending on whether it fits the <10s local-execution budget.
 
@@ -38,7 +38,7 @@ The six scan categories below are the in-scope surface for this repository. Spec
 
 Detects credentials, API keys, tokens, and other sensitive material introduced in a pull request before they merge. Runs on the diff for performance and on full-repo for periodic baseline sweeps.
 
-The CI surface is `secret-scan-pulse`, which runs NVIDIA's licensed TruffleHog Enterprise (Pulse Secret Scanner) on `nv-gha-runners`. Each run publishes redacted findings to the repository Security tab (maintainers only); raw scanner output is not written to the job log. Local pre-commit checks use `secret-scan-trufflehog`, built on the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) CLI. See the [workflow catalogue](.github/workflows/README.md) for the CI interface and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) for the hook.
+The CI surface is `secret-scan-pulse`, which runs NVIDIA's licensed TruffleHog Enterprise (Pulse Secret Scanner) on `nv-gha-runners`. Each run publishes redacted findings to the repository Security tab (maintainers only); raw scanner output is not written to the job log. Local pre-commit checks use `secret-scan-trufflehog`, built on the open-source [`trufflesecurity/trufflehog`](https://github.com/trufflesecurity/trufflehog) CLI. See the [workflow catalogue](.github/workflows/README.md) for the CI interface and the [hook catalogue](hooks/README.md) for the hook.
 
 ### License scanning
 
@@ -64,9 +64,11 @@ Performs static code analysis to surface security defects in first-party source 
 
 Flags terminology and content that conflicts with NVIDIA brand, legal, or inclusivity guidance.
 
+The pre-commit surface is `guardwords-scan-code-scanning`, which sends the staged diff to NVIDIA's internal code-scanning service. It is for NVIDIA employees only and skips with a notice for everyone else. There is no GuardWords CI workflow yet. See the [GuardWords hook guide](hooks/guardwords/README.md).
+
 ## Example
 
-The expected consumption pattern for each surface is shown below. See [Pin policy per surface](#pin-policy-per-surface) for the recommended pin in each context (40-character commit SHA for workflows, release tag for pre-commit hooks).
+The expected consumption pattern for each surface is shown below. See [Pin policy per surface](#pin-policy-per-surface) for the recommended pin in each context (a 40-character commit SHA on both surfaces; pre-commit pins carry the release tag in a `# frozen:` comment).
 
 **Reusable workflow** — drop into a new isolated job (the CI security gate):
 
@@ -93,21 +95,21 @@ The full catalogue lives in [`.github/workflows/`](.github/workflows/README.md).
 **Pre-commit hook** (in a consumer's `.pre-commit-config.yaml`):
 
 ```yaml
-# `secret-scan-trufflehog` installs its pinned scanner in pre-commit's
-# isolated environment; no system TruffleHog installation is needed.
 - repo: https://github.com/NVIDIA/security-workflows
-  rev: v0.3.0                              # release tag — see Pin policy per surface below
+  rev: c736f0454dc99764a66af6b906adfcdfbf621985  # frozen: v0.4.0 — see Pin policy per surface below
   hooks:
     - id: secret-scan-trufflehog
 ```
+
+Every hook, what it needs on the developer's machine, and the rules shared by all hooks are in the [hook catalogue](hooks/README.md).
 
 ## Getting Started
 
 ### Consumers (downstream NVIDIA repositories)
 
-Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (release tag) in the consumer's `.pre-commit-config.yaml`. `secret-scan-trufflehog` uses `language: python` and installs its pinned, SHA-256-verified TruffleHog release in pre-commit's isolated environment; consumers need no system scanner or shell installer. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
+Reusable workflows are consumed via GitHub Actions' [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) mechanism — a job-level `uses:` reference in the consumer's workflow, pinned by 40-character commit SHA. Pre-commit hooks are consumed via the [pre-commit](https://pre-commit.com/) framework, which references this repository by URL and `rev:` (commit SHA, with the release tag in a `# frozen:` comment) in the consumer's `.pre-commit-config.yaml`. The full per-surface pin policy is documented in [Pin policy per surface](#pin-policy-per-surface) below.
 
-Per-surface onboarding instructions — runner labels, trigger model, hook arguments, required developer-side tooling, security trade-offs — are documented inline: each workflow file's `workflow_call` definition and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
+Per-surface onboarding instructions — runner labels, trigger model, hook arguments, required developer-side tooling, security trade-offs — are in the [workflow catalogue](.github/workflows/README.md) and the [hook catalogue](hooks/README.md), and inline in each workflow file's `workflow_call` definition and [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Higher-level guidance lands in [`SUPPORT.md`](SUPPORT.md) as each surface stabilizes.
 
 The current release status of each scan category lives in [`ROADMAP.md`](ROADMAP.md).
 
@@ -149,7 +151,7 @@ To run the CI security workflows in your repository:
 1. **Get self-hosted runner access.** Your org must have the [`nvidia-runner-mgmt`](https://nv/gha-runner-app) app installed, and your repo must be granted a runner group (e.g. `nv-cpu-general`) via a PR to the [runner configuration repository](https://nv/gha-runner-config) — see [Requesting access](https://nv/gha-runner-access).
 2. **Confirm the Vault / Pulse Actions variables exist** (secret-scan only). The Pulse workflow reads repo/org variables `NV_VAULT_URL`, `NVCR_VAULT_*`, `SECRET_SCAN_PULSE_IMAGE`, and `SECRET_SCAN_PULSE_IMAGE_TAG`. If unset, the Vault step fails with `Input required and not supplied: url` — ask the GitHub-First platform team to provision them.
 3. **Add the caller workflow** — reference the reusable workflow pinned by commit SHA, grant the permissions it declares, and set `runs-on` to a real label (see the [Example](#example)).
-4. **Add the pre-commit hook** (optional, local-advisory) — see the [Example](#example).
+4. **Add the pre-commit hook** (optional, local-advisory) — see the [hook catalogue](hooks/README.md).
 5. **Require the check** in branch protection once it is green.
 
 Reference onboarding PRs: [`NVIDIA/cccl#10010`](https://github.com/NVIDIA/cccl/pull/10010) and [`NVIDIA/cuda-python#2405`](https://github.com/NVIDIA/cuda-python/pull/2405).
@@ -171,7 +173,7 @@ Consumers must pin every reference. The recommended pin differs by surface becau
 | Where the reference appears | Recommended pin | Rationale |
 |---|---|---|
 | Job-level `uses:` in a consumer workflow (reusable workflow) | 40-character commit SHA | GitHub Actions has no autoupdate mechanism; a force-pushed tag is exploited on the next CI run. |
-| `rev:` in a consumer `.pre-commit-config.yaml` | Release tag (e.g. `v0.1.0`) | `pre-commit autoupdate` is the gated refresh mechanism; tags from this repository are immutable per release policy. |
+| `rev:` in a consumer `.pre-commit-config.yaml` | 40-character commit SHA with the release tag as a comment (e.g. `rev: <commit SHA>  # frozen: v0.4.0`) | `pre-commit autoupdate --freeze` writes this form and is the gated refresh mechanism. A SHA cannot be re-pointed, so the pin holds even if a tag were moved; the comment keeps the version readable. |
 
 Branch references (`@main`, `@latest`) are not acceptable on any surface — they defeat reproducibility and supply-chain controls.
 

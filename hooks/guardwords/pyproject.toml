@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# Standard library only, and nothing is downloaded at install time: the
+# NVIDIA-internal client is discovered at run time. That keeps
+# `pre-commit install` working for contributors without NVIDIA network access.
+[project]
+name = "nvidia-security-workflows-guardwords"
+version = "0"
+description = "pre-commit wrapper for NVIDIA's internal code-scanning client"
+requires-python = ">=3.8"
+
+[project.scripts]
+guardwords-scan-code-scanning = "guardwords_hook:main"
+
+[tool.setuptools]
+py-modules = ["guardwords_hook"]
