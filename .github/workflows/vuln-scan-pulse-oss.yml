@@ -1367,6 +1367,16 @@ jobs:
               r"[?&](?:token|access_token|id_token|jwt|sig|signature|"
               r"x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential)|"
               r"x-ms-(?:sig|signature|se)|key|secret)=", re.IGNORECASE)
+          credential_assignment = re.compile(
+              r"\b(?:authorization|proxy[._ -]?authorization|(?:set[._ -]?)?cookie|"
+              r"(?:x[._ -]?)?api[._ -]?(?:key|token)|x[._ -]?charon[._ -]?gha[._ -]?token|"
+              r"(?:access|id|refresh)[._ -]?token|client[._ -]?secret|token|secret|password)"
+              r"[\\\"']*\s*[:=]\s*\S", re.IGNORECASE)
+          url_credentials = re.compile(r"\bhttps?://[^/\s\"'<>]*@", re.IGNORECASE)
+          known_credentials = tuple(value for value in (
+              os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+              os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL"),
+          ) if value)
           sensitive_key = re.compile(
               r"(^|_)(authorization|proxy_authorization|cookie|set_cookie|api_key|api_token|"
               r"token|secret|access_token|id_token|refresh_token|client_secret|password|"
@@ -1381,6 +1391,8 @@ jobs:
               """Fail closed on credential-shaped fields or values throughout a report."""
               if isinstance(value, dict):
                   for key, child in value.items():
+                      # Keys may be copied into failure diagnostics, so inspect them too.
+                      inspect(key)
                       if sensitive_key.search(normalized_key(str(key))):
                           raise SystemExit(
                               "::error::The scan report contains a credential-like field.")
@@ -1392,7 +1404,9 @@ jobs:
                   for _ in range(3):
                       value = unquote(value)
                       value = re.sub(r"\\u00([0-9a-fA-F]{2})", lambda m: chr(int(m[1], 16)), value)
-                  if jwt_value.search(value) or bearer_value.search(value) or signed_url.search(value):
+                  if (jwt_value.search(value) or bearer_value.search(value) or signed_url.search(value)
+                          or credential_assignment.search(value) or url_credentials.search(value)
+                          or any(secret in value for secret in known_credentials)):
                       raise SystemExit("::error::The scan report contains a credential-like value.")
 
           try:
@@ -1401,6 +1415,10 @@ jobs:
               describe(exists=True, bytes=len(raw), parsed=True, credential_scan="failed")
               publish(False)
               raise
+
+          # Preserve vetted public references, not arbitrary deployment destinations.
+          public_reference_hosts = {"nvd.nist.gov", "cve.org", "www.cve.org", "cve.mitre.org",
+                                    "cwe.mitre.org", "github.com", "osv.dev"}
 
           def abstract(value):
               """Keep report structure and findings while removing deployment destinations."""
@@ -1411,9 +1429,11 @@ jobs:
               if not isinstance(value, str):
                   return value
               def alias_url(match):
-                  """Preserve URL paths but replace identifying authorities."""
+                  """Preserve public references; replace other identifying authorities."""
                   try:
                       url = urlsplit(match.group())
+                      if url.scheme.lower() in {"http", "https"} and url.hostname in public_reference_hosts:
+                          return match.group()
                       return urlunsplit((url.scheme, "scanner.example", url.path, url.query, url.fragment))
                   except ValueError:
                       return "[URL]"

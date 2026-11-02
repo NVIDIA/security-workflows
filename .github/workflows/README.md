@@ -186,11 +186,13 @@ Behaviours to know about before you point it at a path:
 
 `failure_policy` decides only whether *findings* fail the job — the scan always produces the full report. `report-only` (default) warns; `fail-on-vulnerability` blocks on any finding. **Scanner, transport, and report-validation failures block under both**: a missing, malformed, or credential-bearing report is never a pass. The CLI always runs with `--no-fail` and the policy is applied to the validated report, so a non-zero scanner exit is always a failed scan — no finding message in the log can turn it into a pass. **Start on `report-only`** — turning on `fail-on-vulnerability` in an established repository blocks everything on day one over pre-existing findings. Triage first, then flip.
 
-`scan_mode: auto` runs a `persistent` scan (which creates or updates project state in the backend) only on `registered_branch` with an nSpect ID, and a stateless `rapid` scan everywhere else. Pass `rapid` explicitly where backend state is not wanted at all. Set `build: true` for **Maven** and **Go**, whose dependency graphs resolve only through a build.
+`scan_mode: auto` runs a full `persistent` scan only on `registered_branch` with an nSpect ID, and a stateless `rapid` scan everywhere else. The current CLI removes full-scan backend results after report retrieval when inventory write-back is off; the mode name does not guarantee retained results. Pass `rapid` explicitly where backend state is not wanted at all. Set `build: true` for **Maven** and **Go**, whose dependency graphs resolve only through a build.
 
 Persistent scans set `detect.wait.for.results=true`. `snippet_scan: true` is for
 registered full releases only and requires `inventory_writeback: false`; PR scans
 remain RAPID-only. Binary and signature-only STATELESS modes are not exposed.
+Snippet-match export is not integrated yet; the vulnerability report is not a
+snippet report. See the [current limitations](../../docs/vuln-scan/README.md#controls-and-results).
 A backend policy violation without reported findings, including a license-only
 violation, is refused rather than passed; the enforcement contract above is unchanged.
 

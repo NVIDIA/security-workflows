@@ -13,7 +13,7 @@ and inventory write-back validation remain separate.
 | --- | --- | --- |
 | Pull requests | `scan_mode: rapid` | Dependency analysis only. PR mirrors are RAPID-only; no persistent project/version or inventory update. |
 | Unregistered source | `scan_mode: rapid`, omit `nspect_id` | No nSpect registration or approved-exception lookup. |
-| Registered release branch | `scan_mode: persistent`, `nspect_id`, `registered_branch` | Full scan; creates or updates backend project/version state. Pilot-only until this workflow's registered integration is verified. |
+| Registered release branch | `scan_mode: persistent`, `nspect_id`, `registered_branch` | Full scan; backend results are cleaned up after report retrieval without inventory write-back. Registered integration remains unverified. |
 | Release with snippets | Full-scan inputs plus `snippet_scan: true` | Registered full releases only; waits for results. Requires `inventory_writeback: false`. |
 | Release inventory update | Full-scan inputs plus `sbom_name`, `inventory_writeback: true` | Replaces inventory for the selected registration. Queue acceptance is not completed processing. No job polling is added. |
 
@@ -86,8 +86,20 @@ DEBUG logging and redacted console output. Raw diagnostic ZIP files are not
 supported or published. Logs are bounded to 2 MB. If a credential field cannot be
 parsed safely, the remaining log is withheld.
 
+Reports preserve public reference links on NVD, CVE, CWE, GitHub and OSV hosts;
+other URL destinations are abstracted. Reports containing credential-like fields,
+headers or known job credentials are rejected, not uploaded. Do not put credentials
+in project metadata or report text.
+
 Check detailed Detect status and completed analysis, not just an empty findings
 list. For snippets, inspect actual snippet matches, not just a nonempty BOM.
+
+This workflow does not yet export snippet-match details. Its current scanner
+cleans up backend results when inventory write-back is off, so a vulnerability
+report is not a saved snippet report. Do not enable inventory write-back just to
+retain snippet results. Match export and exact-workflow live acceptance remain pending.
+Snippet matches need separate review; snippet-only matches are excluded from
+vulnerability reports. See [snippet results](https://docs.blackduck.com/r/blackduck/2026.7/black-duck-documentation/about-snippet-matching.html).
 
 The suite uses hyphenated `vuln-` names: `vuln-python-wheels-artifact`,
 `vuln-python-project`, `vuln-snippet-scan`, `vuln-detect-properties`,
@@ -178,7 +190,8 @@ Add this step to the existing build job:
 ```
 
 Make the scan job depend on that build job with `needs`, and add these reusable
-workflow inputs. Keep the caller's reviewed workflow SHA and permissions unchanged:
+workflow inputs. Pin a reviewed workflow commit that includes these inputs;
+older commits do not accept them. Keep the required permissions unchanged:
 
 ```yaml
 with:
@@ -198,9 +211,11 @@ for an unregistered RAPID scan.
 
 The workflow downloads only that named artifact from the **same workflow run**.
 It installs offline, runs `pip check`, verifies the selected package is installed,
-and supplies Detect's Python/PIP paths and PIP-only selection. It inspects only
-the selected installed package, not nested sample requirements. Missing/incompatible
-dependencies fail before scanning. The environment is read-only during the scan.
+and supplies Detect's Python/PIP paths and PIP-only selection. PIP dependency
+analysis follows the selected installed package's dependency tree, not nested
+sample requirements. A full scan can still signature/snippet-scan source under
+`scan_path`. Missing/incompatible dependencies fail before scanning. The prepared
+environment is read-only during the scan.
 
 ### Wheel-mode limits
 
