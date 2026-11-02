@@ -525,7 +525,9 @@ jobs:
           umask 077
           output_dir="$RUNNER_TEMP/pulse-oss-scan"
           mkdir -p "$output_dir"
+          printf 'PULSE_OSS_OUTPUT_DIR=%s\n' "$output_dir" >> "$GITHUB_ENV"
           raw_log="$(mktemp "${RUNNER_TEMP}/pulse-oss-scanner.XXXXXX.log")"
+          printf 'PULSE_OSS_RAW_LOG=%s\n' "$raw_log" >> "$GITHUB_ENV"
           container_name="pulse-oss-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # The CLI rejects path separators here, so it writes into workdir /tmp instead.
           report_name="vulnerability-report.json"
@@ -538,16 +540,13 @@ jobs:
           # never mounted, and the scanner may write anywhere inside the copy. The permissions
           # are open because the image runs unprivileged and copies in as the runner's uid, and
           # Pulse walks the tree with du, which fails the whole scan on an unreadable directory.
+          # Register the copy before filling it, so cleanup still finds it if cp or chmod fails.
           scan_root="$(mktemp -d "${RUNNER_TEMP}/pulse-oss-src.XXXXXX")"
+          printf 'PULSE_OSS_SCAN_ROOT=%s\n' "$scan_root" >> "$GITHUB_ENV"
           cp -a "$GITHUB_WORKSPACE/." "$scan_root/"
           chmod -R a+rwX "$scan_root"
 
-          {
-            printf 'PULSE_OSS_OUTPUT_DIR=%s\n' "$output_dir"
-            printf 'PULSE_OSS_RAW_LOG=%s\n' "$raw_log"
-            printf 'PULSE_OSS_CONTAINER=%s\n' "$container_name"
-            printf 'PULSE_OSS_SCAN_ROOT=%s\n' "$scan_root"
-          } >> "$GITHUB_ENV"
+          printf 'PULSE_OSS_CONTAINER=%s\n' "$container_name" >> "$GITHUB_ENV"
 
           # Findings never set the exit code: the CLI always runs --no-fail, and the enforce step
           # applies failure_policy to the validated report. Under --fail the CLI exits 1 for
