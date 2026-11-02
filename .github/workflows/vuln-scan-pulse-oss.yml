@@ -534,7 +534,6 @@ jobs:
 
           # Detectors write next to each project (.egg-info, bd_nspect), so the scanner gets a
           # writable copy, never the checkout. Registered before cp so cleanup always finds it.
-          # Open permissions: the image runs unprivileged and Pulse's du fails on unreadable dirs.
           scan_root="$(mktemp -d "${RUNNER_TEMP}/pulse-oss-src.XXXXXX")"
           printf 'PULSE_OSS_SCAN_ROOT=%s\n' "$scan_root" >> "$GITHUB_ENV"
           cp -a "$GITHUB_WORKSPACE/." "$scan_root/"
