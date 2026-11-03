@@ -188,9 +188,10 @@ Behaviours to know about before you point it at a path:
 `scan_mode: auto` runs a full `persistent` scan only on `registered_branch` with an nSpect ID, and a stateless `rapid` scan everywhere else. The current CLI removes full-scan backend results after report retrieval when inventory write-back is off; the mode name does not guarantee retained results. Pass `rapid` explicitly where backend state is not wanted at all. Set `build: true` for **Maven** and **Go**, whose dependency graphs resolve only through a build.
 
 Persistent scans set `detect.wait.for.results=true`; PR scans remain RAPID-only.
-Snippet scanning and downloadable snippet-match reports are being validated and
-will be added in a follow-up release. Binary and signature-only STATELESS modes
-are not exposed. See the [scan guide](../../docs/vuln-scan/README.md).
+`snippet_scan: true` enables snippet matching and JSON export for registered full
+releases with `inventory_writeback: false`. With `upload_report: true`, the validated
+snippet report is uploaded separately from the vulnerability report. Binary and
+signature-only STATELESS modes are not exposed. See the [scan guide](../../docs/vuln-scan/README.md#snippet-matching).
 A backend policy violation without reported findings, including a license-only
 violation, is refused rather than passed; the enforcement contract above is unchanged.
 
@@ -204,6 +205,7 @@ Optional controls, also forwarded by the suite under hyphenated `vuln-` names:
 | --- | --- | --- |
 | `python_wheels_artifact` | empty | Same-run artifact with all intended runtime wheels for Python 3.12 / Linux amd64. Requires `python_project`, `build: false` and the `registered_branch` ref, never a PR mirror. |
 | `python_project` | empty | Installed distribution to inspect in the separate, offline-prepared runtime, read-only during scanning. `.pth` hooks are removed before checks; no native GPU build. |
+| `snippet_scan` | `false` | Snippet matching and a separate JSON export. Registered full releases only, no inventory write-back. Suite input: `vuln-snippet-scan`. |
 | `detect_properties` | `{}` | Typed JSON allowlist. Cannot override workflow-owned settings or prepared-Python detector selection, root or project settings. |
 | `show_console` | `false` | Redacted scanner console output with mandatory service-destination abstraction. |
 | `debug_logging` | `false` | Pulse DEBUG logging; use with `show_console`. No raw diagnostic ZIP support or unmasking option. |

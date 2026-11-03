@@ -4,6 +4,16 @@ All notable changes to the workflows in this repository will be documented in th
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See [`README.md`](README.md#versioning) for the SHA-pinning contract that consumers are expected to follow.
 
+## [Unreleased]
+
+### Added
+
+- Optional full-release snippet matching and a separate validated JSON artifact, forwarded through the suite. PR scans remain RAPID-only; snippet scans cannot write inventory.
+
+### Changed
+
+- Pin the vulnerability scanner to the verified stable image with Source snippet export support.
+
 ## [0.5.0] - 2026-11-03
 
 Additive release: two reusable workflows (vulnerability, malware) and one pre-commit hook (GuardWords). Existing suite callers need no change — `enable-vuln-scan` and `enable-malware-scan` default to false, and the scans' permissions (`contents: read` + `id-token: write` for the vulnerability scan, `id-token: write` alone for the malware scan) are already inside the suite's permission union.

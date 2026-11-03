@@ -6,8 +6,8 @@ not a moving branch. Access must be approved for the calling repository and ref.
 Prepared-Python RAPID tests passed. Registered release and inventory write-back
 validation remain separate.
 
-**Not yet supported:** snippet scanning and downloadable snippet-match reports
-are being validated and will be added in a follow-up release.
+Snippet matching is optional for registered full release scans. It is not available
+for PR, RAPID, STATELESS or inventory write-back scans.
 
 ## Scan types
 
@@ -16,6 +16,7 @@ are being validated and will be added in a follow-up release.
 | Pull requests | `scan_mode: rapid` | Dependency analysis only. PR mirrors are RAPID-only; no persistent project/version or inventory update. |
 | Unregistered source | `scan_mode: rapid`, omit `nspect_id` | No nSpect registration or approved-exception lookup. |
 | Registered release branch | `scan_mode: persistent`, `nspect_id`, `registered_branch` | Full scan; backend results are cleaned up after report retrieval without inventory write-back. Registered integration remains unverified. |
+| Release with snippets | Full-scan inputs plus `snippet_scan: true`, `inventory_writeback: false` | Waits for analysis and validates a separate snippet-match JSON report before cleanup. |
 | Release inventory update | Full-scan inputs plus `sbom_name`, `inventory_writeback: true` | Replaces inventory for the selected registration. Queue acceptance is not completed processing. No job polling is added. |
 
 `auto` chooses persistent only on the registered branch with an ID; otherwise it
@@ -65,6 +66,37 @@ does not register repositories. Use the matching SBOM name where a branch has
 multiple registrations; inventory write-back always requires one.
 
 ## Controls and results
+
+### Snippet matching
+
+Use a registered release branch and the matching SBOM name where needed:
+
+```yaml
+with:
+  scan_mode: persistent
+  nspect_id: ${{ vars.NSPECT_ID }}
+  registered_branch: release
+  sbom_name: library
+  snippet_scan: true
+  inventory_writeback: false
+  upload_report: true
+```
+
+`snippet_scan` defaults to `false`; the suite forwards it as `vuln-snippet-scan`.
+The workflow enables snippet matching, waits for results and calls the CLI with
+`--snippet-report snippet-matches.json`. No additional report input is needed.
+With `upload_report: true`, download the separate `pulse-oss-snippets-*` artifact
+within three days. The vulnerability report remains a separate artifact.
+
+The snippet report is a JSON list containing file, component, match type, ignored
+status and source start/end lines. It includes unreviewed Source candidates without
+approving them. Line numbers are either a valid pair or both `null` when unavailable.
+An empty list can mean no matches; a missing, malformed or unsafe report fails.
+Snippet matches need review and are not themselves vulnerability findings. These
+controls do not turn `failure_policy` into a snippet-match or license-policy gate.
+Results are collected before cleanup; do not enable inventory write-back to retain them.
+
+### Other controls
 
 - `scan_path`: repository-relative directory, default `.`.
 - `build`: scanner build mode, default `false`. It can execute repository build
@@ -149,7 +181,9 @@ paths are never caller-settable.
 The workflow owns the scan engines, identity, service routing, project names,
 paths, result waiting and timeout. Do not pass credentials,
 arbitrary commands, executable paths or TLS changes. For persistent scans it sets
-`detect.wait.for.results=true`. Snippet-matching properties are not accepted.
+`detect.wait.for.results=true`. The `snippet_scan` input owns
+`detect.blackduck.signature.scanner.snippet.matching=SNIPPET_MATCHING`;
+callers cannot override it through `detect_properties`.
 
 Reference documentation (Detect 11.5.0):
 [detector settings](https://docs.blackduck.com/r/detect/11.5.0/black-duck-detect/detector.html),
