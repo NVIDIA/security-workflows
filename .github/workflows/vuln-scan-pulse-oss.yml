@@ -73,6 +73,11 @@ on:
         type: string
         required: false
         default: ''
+      snippet_scan:
+        description: Enable snippet matching and JSON export for registered full scans only. Requires inventory_writeback false.
+        type: boolean
+        required: false
+        default: false
       detect_properties:
         description: JSON object of supported Detect tuning properties. See docs/vuln-scan for the allowed names and values.
         type: string
@@ -164,9 +169,9 @@ jobs:
       scanner_exit_code: ${{ steps.scanner.outputs.exit_code }}
       scanner_image_digest: ${{ steps.image.outputs.digest }}
     env:
-      # Approved stable release 0.5.3-charon.11 (charon-stable since 2026-10-27). Pinned by digest
+      # Approved stable release 0.5.3-charon.13. Pinned by its verified NVCR digest
       # because the scanner receives the job's OIDC request credentials; callers cannot substitute it.
-      SCANNER_IMAGE_REF: nvcr.io/0898940053369630/pulse/pulse-oss-cli@sha256:44481e18efdf384fc212eea3a300ae001385e10d1e2d05e92a8a7d350b328c60
+      SCANNER_IMAGE_REF: nvcr.io/0898940053369630/pulse/pulse-oss-cli@sha256:a965d92fa8462ade2117ba1019b1a192f764d919c338a2d6b2d6b1d9a5352823
       SCANNER_IMAGE_ALLOWED_REGISTRY: nvcr.io
       CHARON_PROXY_SERVER: ext-nv-prd-apps.teleport.sh:443
       CHARON_JOIN_TOKEN: charon-gha-runners
@@ -186,6 +191,7 @@ jobs:
           INPUT_WRITEBACK: ${{ inputs.inventory_writeback }}
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
           INPUT_BUILD: ${{ inputs.build }}
+          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
           INPUT_PYTHON_WHEELS_ARTIFACT: ${{ inputs.python_wheels_artifact }}
           INPUT_PYTHON_PROJECT: ${{ inputs.python_project }}
           INPUT_DETECT_PROPERTIES: ${{ inputs.detect_properties }}
@@ -358,6 +364,13 @@ jobs:
             fi
           fi
 
+          # Snippets are release-only and must never replace registered inventory.
+          if [[ "${INPUT_SNIPPET_SCAN:-false}" == true ]] \
+            && [[ "$resolved_mode" != persistent || "$INPUT_WRITEBACK" == true ]]; then
+            echo "::error::snippet_scan requires a registered full scan with inventory_writeback false."
+            exit 1
+          fi
+
           # Parse data, never shell fragments. The workflow owns identity, paths, engines,
           # result waiting and timeout; no property may bypass those controls.
           RESOLVED_MODE="$resolved_mode" python3 -I - <<'PY'
@@ -412,6 +425,8 @@ jobs:
                   raise ValueError("property conflicts with prepared Python environment")
               if os.environ["RESOLVED_MODE"] == "persistent":
                   settings["DETECT_WAIT_FOR_RESULTS"] = "true"
+              if os.environ.get("INPUT_SNIPPET_SCAN") == "true":
+                  settings["DETECT_BLACKDUCK_SIGNATURE_SCANNER_SNIPPET_MATCHING"] = "SNIPPET_MATCHING"
               for name, value in properties.items():
                   if name in strings:
                       if not isinstance(value, str) or not value or len(value) > 512:
@@ -841,6 +856,7 @@ jobs:
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
           INPUT_PYTHON_WHEELS_ARTIFACT: ${{ inputs.python_wheels_artifact }}
           INPUT_DEBUG_LOGGING: ${{ inputs.debug_logging }}
+          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
           INPUT_SHOW_CONSOLE: ${{ inputs.show_console }}
         run: |
           set -euo pipefail
@@ -909,6 +925,9 @@ jobs:
             if [[ "$INPUT_WRITEBACK" == true ]]; then
               command+=(--override)
             fi
+            if [[ "$INPUT_SNIPPET_SCAN" == true ]]; then
+              command+=(--snippet-report snippet-matches.json)
+            fi
           else
             command+=(rapidscan --no-fail --vulnerability-report "$report_name")
           fi
@@ -956,6 +975,12 @@ jobs:
 
           report_copied=false
           status_copied=false
+          snippet_copied=true
+          if [[ "$INPUT_SNIPPET_SCAN" == true ]]; then
+            snippet_copied=false
+            if docker cp "$container_name:/tmp/snippet-matches.json" \
+              "$output_dir/snippet-matches.json" >/dev/null 2>&1; then snippet_copied=true; fi
+          fi
           if docker cp "$container_name:/tmp/$report_name" \
             "$output_dir/$report_name" >/dev/null 2>&1; then report_copied=true; fi
           if docker cp "$container_name:$CONTAINER_SCAN_PATH/bd_nspect/status.json" \
@@ -1144,7 +1169,7 @@ jobs:
           fi
 
           printf 'exit_code=%s\n' "$scanner_status" >> "$GITHUB_OUTPUT"
-          if [[ "$scanner_status" == 0 && ( "$report_copied" != true || "$status_copied" != true ) ]]; then
+          if [[ "$scanner_status" == 0 && ( "$report_copied" != true || "$status_copied" != true || "$snippet_copied" != true ) ]]; then
             echo "::error::The scanner's current report or detailed status could not be collected."
             exit 1
           fi
@@ -1292,6 +1317,7 @@ jobs:
         id: analysis
         if: always() && steps.classify.outputs.effective_status == '0'
         env:
+          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
           CONTAINER_SCAN_PATH: ${{ steps.source.outputs.container_path }}
         run: |
           set -euo pipefail
@@ -1315,6 +1341,12 @@ jobs:
                              for item in status["overallStatus"])
                       or any(not isinstance(item, dict) or item.get("type") == "EXCEPTION" for item in status["issues"])):
                   raise ValueError("analysis failure")
+              if os.environ.get("INPUT_SNIPPET_SCAN") == "true":
+                  root = os.environ["CONTAINER_SCAN_PATH"].rstrip("/") or "/"
+                  signature_keys = {"SIGNATURE_SCAN", f"Signature scan on {root}",
+                                    f"Signature scan / Snippet scan on {root}"}
+                  if not any(item.get("key") in signature_keys for item in status["status"]):
+                      raise ValueError("signature scan missing")
           except (OSError, ValueError, TypeError):
               raise SystemExit("::error::Fresh Detect status is missing, incomplete or failed. A report alone is not a completed scan.") from None
           print("Detailed Detect status confirms completed analysis.")
@@ -1327,6 +1359,7 @@ jobs:
         if: always() && steps.classify.outcome == 'success' && steps.classify.outputs.effective_status == '0' && steps.analysis.outcome == 'success'
         env:
           INPUT_NSPECT_ID: ${{ inputs.nspect_id }}
+          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
         run: |
           set -euo pipefail
           OUTPUT_DIR="$PULSE_OSS_OUTPUT_DIR" python3 -I - <<'PY'
@@ -1446,6 +1479,32 @@ jobs:
               value = re.sub(r"(?:https?|ssh)://[^\s\"'<>]+", alias_url, value, flags=re.IGNORECASE)
               return re.sub(r"(?i)\b(?:[a-z0-9-]+\.)*(?:nvidia\.com|blackduck\.com|teleport\.sh)\b",
                             "scanner.example", value)
+
+          if os.environ.get("INPUT_SNIPPET_SCAN") == "true":
+              # Validate and credential-check the separate export before any upload.
+              snippet_report = Path(os.environ["OUTPUT_DIR"]) / "snippet-matches.json"
+              try:
+                  snippets = json.loads(snippet_report.read_text(encoding="utf-8"))
+                  inspect(snippets)
+                  if not isinstance(snippets, list):
+                      raise ValueError("snippet list missing")
+                  for match in snippets:
+                      if (not isinstance(match, dict) or match.get("match_type") != "SNIPPET"
+                              or not isinstance(match.get("file"), str) or not match["file"]
+                              or not isinstance(match.get("component"), str) or not match["component"]
+                              or "ignored" not in match or (match["ignored"] is not None and type(match["ignored"]) is not bool)
+                              or "source_start_line" not in match or "source_end_line" not in match):
+                          raise ValueError("snippet fields missing")
+                      start, end = match["source_start_line"], match["source_end_line"]
+                      if not ((start is None and end is None)
+                              or (type(start) is int and type(end) is int and 0 < start <= end)):
+                          raise ValueError("snippet range invalid")
+                  snippet_report.write_text(json.dumps(abstract(snippets), ensure_ascii=True) + "\n", encoding="utf-8")
+                  snippet_report.chmod(0o600)
+              except (OSError, ValueError, TypeError, SystemExit):
+                  describe(snippet_report="missing_invalid_or_unsafe")
+                  publish(False)
+                  raise SystemExit("::error::The snippet report is missing, incomplete or unsafe.") from None
 
           payload = abstract(payload)
           report.write_text(json.dumps(payload, ensure_ascii=True) + "\n", encoding="utf-8")
@@ -1576,6 +1635,15 @@ jobs:
         with:
           name: pulse-oss-scan-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.PULSE_OSS_OUTPUT_DIR }}/vulnerability-report.json
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload validated snippet report
+        if: always() && inputs.upload_report && inputs.snippet_scan && steps.report.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pulse-oss-snippets-${{ steps.contract.outputs.artifact_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PULSE_OSS_OUTPUT_DIR }}/snippet-matches.json
           if-no-files-found: error
           retention-days: 3
 
