@@ -104,7 +104,6 @@ jobs:
       # vuln-timeout-seconds: 1800
       # vuln-python-wheels-artifact: ''           # set with vuln-python-project
       # vuln-python-project: ''
-      # vuln-snippet-scan: false                  # registered full releases; write-back must be false
       # vuln-detect-properties: '{}'              # typed JSON allowlist
       # vuln-show-console: false                  # redacted output only
       # vuln-debug-logging: false
@@ -162,7 +161,7 @@ jobs:
 ### Vulnerability scan (SCA) — [`vuln-scan-pulse-oss.yml`](vuln-scan-pulse-oss.yml)
 
 See the [vulnerability scan guide](../../docs/vuln-scan/README.md) for scan modes,
-build preparation, snippets, Detect properties, diagnostics and validation limits.
+build preparation, Detect properties, diagnostics and validation limits.
 
 Runs NVIDIA's **Pulse OSS scanner** against the dependency graph under `scan_path` and reports findings to the **nSpect** vulnerability backend, so they become findings of record rather than only CI output.
 The scanner is pulled from `nvcr.io` and reaches nSpect through a Charon application tunnel on loopback. **Callers do not supply credentials.** The workflow uses GitHub OIDC for Charon access and to retrieve a registry credential from Vault for the image pull. That registry credential enters the job, but is not passed into the scanner container. The scanner image is **pinned by digest inside the workflow** (the approved `charon-stable` release), so a caller cannot substitute another image, and every run records the digest it executed in the job summary and the `scanner_image_digest` output. A scanner upgrade is a digest change in this repository. The container runs with no capabilities, cannot acquire any, and never sees your checkout: it is given a disposable copy, which is discarded when the job ends. The copy is writable, because Detect's language detectors generate metadata next to each project they find and a read-only tree turns those into scan failures.
@@ -188,11 +187,10 @@ Behaviours to know about before you point it at a path:
 
 `scan_mode: auto` runs a full `persistent` scan only on `registered_branch` with an nSpect ID, and a stateless `rapid` scan everywhere else. The current CLI removes full-scan backend results after report retrieval when inventory write-back is off; the mode name does not guarantee retained results. Pass `rapid` explicitly where backend state is not wanted at all. Set `build: true` for **Maven** and **Go**, whose dependency graphs resolve only through a build.
 
-Persistent scans set `detect.wait.for.results=true`. `snippet_scan: true` is for
-registered full releases only and requires `inventory_writeback: false`; PR scans
-remain RAPID-only. Binary and signature-only STATELESS modes are not exposed.
-Snippet-match export is not integrated yet; the vulnerability report is not a
-snippet report. See the [current limitations](../../docs/vuln-scan/README.md#controls-and-results).
+Persistent scans set `detect.wait.for.results=true`; PR scans remain RAPID-only.
+Snippet scanning and downloadable snippet-match reports are being validated and
+will be added in a follow-up release. Binary and signature-only STATELESS modes
+are not exposed. See the [scan guide](../../docs/vuln-scan/README.md).
 A backend policy violation without reported findings, including a license-only
 violation, is refused rather than passed; the enforcement contract above is unchanged.
 
@@ -206,7 +204,6 @@ Optional controls, also forwarded by the suite under hyphenated `vuln-` names:
 | --- | --- | --- |
 | `python_wheels_artifact` | empty | Same-run artifact with all intended runtime wheels for Python 3.12 / Linux amd64. Requires `python_project`, `build: false` and the `registered_branch` ref, never a PR mirror. |
 | `python_project` | empty | Installed distribution to inspect in the separate, offline-prepared runtime, read-only during scanning. `.pth` hooks are removed before checks; no native GPU build. |
-| `snippet_scan` | `false` | Snippet matching for registered full releases only; `inventory_writeback: false` is required. |
 | `detect_properties` | `{}` | Typed JSON allowlist. Cannot override workflow-owned settings or prepared-Python detector selection, root or project settings. |
 | `show_console` | `false` | Redacted scanner console output with mandatory service-destination abstraction. |
 | `debug_logging` | `false` | Pulse DEBUG logging; use with `show_console`. No raw diagnostic ZIP support or unmasking option. |

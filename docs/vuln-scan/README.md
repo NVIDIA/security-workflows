@@ -3,9 +3,11 @@
 Choose a scan for the code you are checking. Use a reviewed workflow commit SHA,
 not a moving branch. Access must be approved for the calling repository and ref.
 
-**Review candidate:** prepared-Python RAPID tests passed. Snippet matching was
-verified in a reference integration, not this exact workflow. Registered release
-and inventory write-back validation remain separate.
+Prepared-Python RAPID tests passed. Registered release and inventory write-back
+validation remain separate.
+
+**Not yet supported:** snippet scanning and downloadable snippet-match reports
+are being validated and will be added in a follow-up release.
 
 ## Scan types
 
@@ -14,7 +16,6 @@ and inventory write-back validation remain separate.
 | Pull requests | `scan_mode: rapid` | Dependency analysis only. PR mirrors are RAPID-only; no persistent project/version or inventory update. |
 | Unregistered source | `scan_mode: rapid`, omit `nspect_id` | No nSpect registration or approved-exception lookup. |
 | Registered release branch | `scan_mode: persistent`, `nspect_id`, `registered_branch` | Full scan; backend results are cleaned up after report retrieval without inventory write-back. Registered integration remains unverified. |
-| Release with snippets | Full-scan inputs plus `snippet_scan: true` | Registered full releases only; waits for results. Requires `inventory_writeback: false`. |
 | Release inventory update | Full-scan inputs plus `sbom_name`, `inventory_writeback: true` | Replaces inventory for the selected registration. Queue acceptance is not completed processing. No job polling is added. |
 
 `auto` chooses persistent only on the registered branch with an ID; otherwise it
@@ -54,7 +55,6 @@ with:
   nspect_id: ${{ vars.NSPECT_ID }}
   registered_branch: release
   sbom_name: library
-  snippet_scan: true
   inventory_writeback: false
   timeout_seconds: 3600
 ```
@@ -71,8 +71,6 @@ multiple registrations; inventory write-back always requires one.
   logic; it does not create a Python or GPU environment.
 - `python_wheels_artifact` and `python_project`: default empty. Set both for the
   [prepared-Python scan](#python-projects); leave both empty for existing behavior.
-- `snippet_scan`: default `false`. Adds snippet matching to registered full release
-  scans only; set `inventory_writeback: false`.
 - `detect_properties`: default `{}`. A JSON object using the
   [typed allowlist](#detect-property-allowlist), not arbitrary Detect options.
 - `timeout_seconds`: 60-3600, default 1800. Passed to Pulse and Detect. This is
@@ -100,17 +98,10 @@ headers or known job credentials are rejected, not uploaded. Do not put credenti
 in project metadata or report text.
 
 Check detailed Detect status and completed analysis, not just an empty findings
-list. For snippets, inspect actual snippet matches, not just a nonempty BOM.
-
-This workflow does not yet export snippet-match details. Its current scanner
-cleans up backend results when inventory write-back is off, so a vulnerability
-report is not a saved snippet report. Do not enable inventory write-back just to
-retain snippet results. Match export and exact-workflow live acceptance remain pending.
-Snippet matches need separate review; snippet-only matches are excluded from
-vulnerability reports. See [snippet results](https://docs.blackduck.com/r/blackduck/2026.7/black-duck-documentation/about-snippet-matching.html).
+list. The vulnerability report is not a snippet-match report.
 
 The suite uses hyphenated `vuln-` names: `vuln-python-wheels-artifact`,
-`vuln-python-project`, `vuln-snippet-scan`, `vuln-detect-properties`,
+`vuln-python-project`, `vuln-detect-properties`,
 `vuln-show-console` and `vuln-debug-logging`. The shared ID remains `nspect-id`.
 
 ## Detect property allowlist
@@ -156,10 +147,9 @@ tree properties in this mode. Python/PIP executable paths and other workflow-own
 paths are never caller-settable.
 
 The workflow owns the scan engines, identity, service routing, project names,
-paths, snippet switch, result waiting and timeout. Do not pass credentials,
+paths, result waiting and timeout. Do not pass credentials,
 arbitrary commands, executable paths or TLS changes. For persistent scans it sets
-`detect.wait.for.results=true`; `snippet_scan` sets
-`detect.blackduck.signature.scanner.snippet.matching=SNIPPET_MATCHING`.
+`detect.wait.for.results=true`. Snippet-matching properties are not accepted.
 
 Reference documentation (Detect 11.5.0):
 [detector settings](https://docs.blackduck.com/r/detect/11.5.0/black-duck-detect/detector.html),
@@ -221,7 +211,7 @@ The workflow downloads only that named artifact from the **same workflow run**.
 It installs offline, runs `pip check`, verifies the selected package is installed,
 and supplies Detect's Python/PIP paths and PIP-only selection. PIP dependency
 analysis follows the selected installed package's dependency tree, not nested
-sample requirements. A full scan can still signature/snippet-scan source under
+sample requirements. A full scan can still signature-scan source under
 `scan_path`. Missing/incompatible dependencies fail before scanning. The prepared
 environment is read-only during the scan.
 

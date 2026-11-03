@@ -73,11 +73,6 @@ on:
         type: string
         required: false
         default: ''
-      snippet_scan:
-        description: Enable snippet matching for a registered-branch persistent scan. Not available with RAPID or inventory_writeback.
-        type: boolean
-        required: false
-        default: false
       detect_properties:
         description: JSON object of supported Detect tuning properties. See docs/vuln-scan for the allowed names and values.
         type: string
@@ -193,7 +188,6 @@ jobs:
           INPUT_BUILD: ${{ inputs.build }}
           INPUT_PYTHON_WHEELS_ARTIFACT: ${{ inputs.python_wheels_artifact }}
           INPUT_PYTHON_PROJECT: ${{ inputs.python_project }}
-          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
           INPUT_DETECT_PROPERTIES: ${{ inputs.detect_properties }}
           NV_VAULT_URL: ${{ vars.NV_VAULT_URL }}
           NVCR_VAULT_ROLE: ${{ vars.NVCR_VAULT_ROLE }}
@@ -364,12 +358,6 @@ jobs:
             fi
           fi
 
-          if [[ "${INPUT_SNIPPET_SCAN:-false}" == true ]] \
-            && [[ "$resolved_mode" != persistent || "$INPUT_WRITEBACK" == true ]]; then
-            echo "::error::snippet_scan requires a registered-branch persistent scan with inventory_writeback false."
-            exit 1
-          fi
-
           # Parse data, never shell fragments. The workflow owns identity, paths, engines,
           # result waiting and timeout; no property may bypass those controls.
           RESOLVED_MODE="$resolved_mode" python3 -I - <<'PY'
@@ -424,8 +412,6 @@ jobs:
                   raise ValueError("property conflicts with prepared Python environment")
               if os.environ["RESOLVED_MODE"] == "persistent":
                   settings["DETECT_WAIT_FOR_RESULTS"] = "true"
-              if os.environ.get("INPUT_SNIPPET_SCAN") == "true":
-                  settings["DETECT_BLACKDUCK_SIGNATURE_SCANNER_SNIPPET_MATCHING"] = "SNIPPET_MATCHING"
               for name, value in properties.items():
                   if name in strings:
                       if not isinstance(value, str) or not value or len(value) > 512:
@@ -1306,7 +1292,6 @@ jobs:
         id: analysis
         if: always() && steps.classify.outputs.effective_status == '0'
         env:
-          INPUT_SNIPPET_SCAN: ${{ inputs.snippet_scan }}
           CONTAINER_SCAN_PATH: ${{ steps.source.outputs.container_path }}
         run: |
           set -euo pipefail
@@ -1330,12 +1315,6 @@ jobs:
                              for item in status["overallStatus"])
                       or any(not isinstance(item, dict) or item.get("type") == "EXCEPTION" for item in status["issues"])):
                   raise ValueError("analysis failure")
-              if os.environ.get("INPUT_SNIPPET_SCAN") == "true":
-                  root = os.environ["CONTAINER_SCAN_PATH"].rstrip("/") or "/"
-                  signature_keys = {"SIGNATURE_SCAN", f"Signature scan on {root}",
-                                    f"Signature scan / Snippet scan on {root}"}
-                  if not any(item.get("key") in signature_keys for item in status["status"]):
-                      raise ValueError("signature scan missing for the selected root")
           except (OSError, ValueError, TypeError):
               raise SystemExit("::error::Fresh Detect status is missing, incomplete or failed. A report alone is not a completed scan.") from None
           print("Detailed Detect status confirms completed analysis.")
