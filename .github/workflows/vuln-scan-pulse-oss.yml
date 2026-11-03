@@ -5,7 +5,7 @@
 #
 # Runs the Pulse open source CLI from nvcr.io, reaching nSpect and the
 # vulnerability backend through the Charon application tunnel on loopback. GitHub OIDC is the
-# only identity presented — no SSA, service, or backend credential enters the job.
+# scan identity; Vault separately supplies the registry credential for image pulling.
 #
 # The calling repository must have an nv-gha-runners grant and must see the Vault variables
 
@@ -153,6 +153,13 @@ jobs:
   pulse-oss:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 75  # headroom above the 3600s maximum scanner timeout
+    # Full scans reuse backend identity, including during report retrieval/cleanup.
+    # Queue them across callers in this repository; keep distinct RAPID jobs independent.
+    concurrency:
+      group: >-
+        ${{ (inputs.scan_mode == 'persistent' || (inputs.scan_mode == 'auto' && inputs.nspect_id != '' && github.ref == format('refs/heads/{0}', inputs.registered_branch))) && 'pulse-oss-full' || format('pulse-oss-rapid-{0}-{1}-{2}-{3}-{4}', github.run_id, github.run_attempt, inputs.scan_path, inputs.python_wheels_artifact, inputs.python_project) }}
+      cancel-in-progress: false
+      queue: max
     defaults:
       run:
         shell: bash
@@ -719,32 +726,52 @@ jobs:
             --volume "$WHEELHOUSE:/runtime-wheels:ro" \
             --volume "$volume:/scan-python:rw" \
             --entrypoint /opt/miniforge/bin/python \
-            -i "$SCANNER_IMAGE_REF" -I - >/dev/null 2>&1 <<'PY'
+            -i "$SCANNER_IMAGE_REF" -I - 2>/dev/null <<'PY'
           import os
+          import re
           import subprocess
           from pathlib import Path
 
           os.umask(0o022)
           environment = {"PATH": "/opt/miniforge/bin:/usr/bin:/bin", "HOME": "/tmp",
                          "LANG": "C.UTF-8", "TMPDIR": "/tmp", "PIP_CONFIG_FILE": "/dev/null"}
-          subprocess.run(["/opt/miniforge/bin/python", "-m", "venv", "/scan-python/venv"],
-                         env=environment, check=True, capture_output=True, timeout=120)
+
+          def run_setup(step, command, timeout):
+              """Fail with the stage and a safe requirement, never raw subprocess output."""
+              try:
+                  subprocess.run(command, env=environment, check=True, capture_output=True, timeout=timeout)
+              except subprocess.CalledProcessError as failure:
+                  detail = ""
+                  # Only accept a bounded package requirement, not URLs, headers or commands.
+                  for line in (failure.stderr or b"")[-8192:].decode("utf-8", errors="replace").splitlines():
+                      match = re.fullmatch(r"ERROR: No matching distribution found for ([A-Za-z0-9][A-Za-z0-9_.\[\],<>=!~*+-]{0,199})", line)
+                      if match and not re.search(r"(?i)gh[pousr]_|github_pat_|xox[baprs]-|eyJ[A-Za-z0-9_-]*\.", match[1]):
+                          detail = f"; no compatible wheel for {match[1]}"
+                          break
+                  print(f"::error::Python setup failed at {step}{detail}.", flush=True)
+                  raise SystemExit(1) from None
+              except subprocess.TimeoutExpired:
+                  print(f"::error::Python setup failed: {step} timed out.", flush=True)
+                  raise SystemExit(1) from None
+              except OSError:
+                  print(f"::error::Python setup could not start {step}.", flush=True)
+                  raise SystemExit(1) from None
+
+          run_setup("virtual environment creation", ["/opt/miniforge/bin/python", "-m", "venv", "/scan-python/venv"], 120)
           python = "/scan-python/venv/bin/python"
           wheels = sorted(map(str, Path("/runtime-wheels").glob("*.whl")))
-          subprocess.run([python, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check",
-                          "install", "--no-index", "--no-cache-dir", "--only-binary=:all:", *wheels],
-                         env=environment, check=True, capture_output=True, timeout=300)
+          run_setup("wheel installation", [python, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check",
+                    "install", "--no-index", "--no-cache-dir", "--only-binary=:all:", *wheels], 300)
           # Wheel installation does not execute .pth hooks. Remove them before
           # starting another venv process, so inspection never runs package startup code.
           for hook in Path("/scan-python/venv/lib").glob("python*/site-packages/*.pth"):
               hook.unlink()
           # Force one installed-project inspection, not unrelated sample requirements.
           Path("/scan-python/runtime-requirements.txt").write_text("", encoding="utf-8")
-          subprocess.run([python, "-I", "-m", "pip", "check"], env=environment,
-                         check=True, capture_output=True, timeout=60)
-          subprocess.run([python, "-I", "-c", "from importlib.metadata import distribution; import sys; distribution(sys.argv[1])",
-                          os.environ["PYTHON_PROJECT"]], env=environment,
-                         check=True, capture_output=True, timeout=30)
+          run_setup("dependency validation", [python, "-I", "-m", "pip", "check"], 60)
+          run_setup("project metadata lookup", [python, "-I", "-c",
+                    "from importlib.metadata import distribution; import sys; distribution(sys.argv[1])",
+                    os.environ["PYTHON_PROJECT"]], 30)
           PY
           then
             echo "::error::Python setup failed. Supply compatible Python 3.12 Linux amd64 wheels for the project and every runtime dependency; pip check must pass."

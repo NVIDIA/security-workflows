@@ -21,6 +21,14 @@ and inventory write-back validation remain separate.
 chooses RAPID. Direct `pull_request` and `pull_request_target` events are rejected.
 Use the approved PR-mirror push flow. Do not use persistent scans for PRs.
 
+Full scans using this workflow run one at a time per calling repository, including
+report retrieval and cleanup. This prevents parallel variants from mixing backend
+results. Project names and inventory targets stay unchanged; writing to the same
+registration still replaces its previous inventory. Up to 100 jobs can wait in the
+[GitHub concurrency queue](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idconcurrency);
+additional jobs are canceled by GitHub. Distinct RAPID variants are not held by
+the full-scan queue.
+
 Signature-only STATELESS, binary, C/C++-specific scans and standalone SBOM uploads
 are not selectable through this workflow. Separate CLI commands are not a promise
 of reusable-workflow support. Local allowlisting in no-nSpect mode remains
@@ -241,6 +249,10 @@ remove genuine runtime dependencies just to make the scan pass.
 
 - **Missing build dependencies:** follow the project's supported setup instructions.
   Do not assume scanner build mode supplies the required tools or Python packages.
+- **Wheel setup failure:** the error names the failed step. If pip identifies a
+  missing compatible wheel, the safe package requirement is shown. Include that
+  wheel and its runtime dependencies for Python 3.12 on Linux amd64. Raw pip output
+  is withheld because package metadata can contain private URLs or credentials.
 - **Dynamic package metadata or dependency-resolution errors:** installed-package
   inspection can be an alternative, provided it covers the intended dependency set.
   PIP-only selection is not a whole-repository solution for mixed-language projects.
