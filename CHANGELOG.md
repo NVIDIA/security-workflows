@@ -6,9 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
+Secret-scan maintenance release — no new scans, inputs, or hooks. One consumer-visible change: the Pulse secret-scan job is renamed, so its status check becomes `… / pulse-secret`. A repository whose branch protection requires the old `… / pulse` check must update that rule in the same change that repins, or the rule waits on a check that never reports. Inputs, permissions, `failure_policy` behaviour, and every pre-commit hook are unchanged.
+
 ### Changed
 
 - Secret scan — the job is renamed from `pulse` to `pulse-secret`, matching `pulse-oss` and `pulse-malware`. Its status check becomes `… / pulse-secret`, so repositories that require the old `… / pulse` check must update branch protection when they repin.
+
+### Fixed
+
+- Secret scan — the filesystem scan checks out at depth 1 instead of fetching every branch and tag. `filesystem` mode reads the checked-out tree, not packed Git history, so the full fetch bought no scan coverage. In `NVIDIA/cuda-python` it spent ~317s of a ~404s job downloading 3.54 GB — most of it the unrelated `gh-pages` branch — to scan 33 MB of source.
 
 ## [0.5.0] - 2026-11-03
 
@@ -31,10 +39,6 @@ Additive release: two reusable workflows (vulnerability, malware) and one pre-co
 
 - Security suite — the preflight reports *every* missing companion input in one run rather than exiting on the first.
 - Pin policy — the recommended pre-commit `rev:` pin is now the 40-character commit SHA with the release tag as a `# frozen:` comment, the form `pre-commit autoupdate --freeze` writes, matching the SHA pin already required for reusable workflows. Existing release-tag pins keep working; switch with `pre-commit autoupdate --freeze` at the next refresh. See [Pin policy per surface](README.md#pin-policy-per-surface).
-
-### Fixed
-
-- Secret scan (Pulse): use a shallow checkout for the filesystem scan instead of downloading every branch and tag's history, avoiding large unrelated branches such as `gh-pages`.
 
 ### Known limitations
 
@@ -121,7 +125,8 @@ First pilot release. Ships the secret-scan surface (Pulse reusable workflow + Tr
 
 - Third-party notices — TruffleHog (AGPL-3.0, developer-installed CLI) and the direct workflow actions (`actions/checkout`, `hashicorp/vault-action`, `docker/login-action`, `actions/setup-python`, `github/codeql-action/upload-sarif`) recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) with SHA pins where applicable.
 
-[Unreleased]: https://github.com/NVIDIA/security-workflows/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/NVIDIA/security-workflows/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/NVIDIA/security-workflows/releases/tag/v0.6.0
 [0.5.0]: https://github.com/NVIDIA/security-workflows/releases/tag/v0.5.0
 [0.4.0]: https://github.com/NVIDIA/security-workflows/releases/tag/v0.4.0
 [0.3.0]: https://github.com/NVIDIA/security-workflows/releases/tag/v0.3.0
