@@ -26,6 +26,10 @@ Additive release: two reusable workflows (vulnerability, malware) and one pre-co
 - Security suite — the preflight reports *every* missing companion input in one run rather than exiting on the first.
 - Pin policy — the recommended pre-commit `rev:` pin is now the 40-character commit SHA with the release tag as a `# frozen:` comment, the form `pre-commit autoupdate --freeze` writes, matching the SHA pin already required for reusable workflows. Existing release-tag pins keep working; switch with `pre-commit autoupdate --freeze` at the next refresh. See [Pin policy per surface](README.md#pin-policy-per-surface).
 
+### Fixed
+
+- Secret scan (Pulse): use a shallow checkout for the filesystem scan instead of downloading every branch and tag's history, avoiding large unrelated branches such as `gh-pages`.
+
 ### Known limitations
 
 - **Charon is a prerequisite for both scans.** The tunnel authorizes per repository *and* per ref, so a consuming tenant must grant the Pulse backends and list every ref it scans from. Gating pull requests needs the `pull-request/*` mirrors listed; without them both scans are post-merge and scheduled gates. The malware scan-submission route is not granted by default and needs platform approval.
