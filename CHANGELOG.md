@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- GuardWords client setup — `install_client.py` finds the client in ProdSec releases from `prod-2026-11-24` on, which publish it without the release tag in the file name (`code_scanning_git_client_linux_amd64`). Until now the script reported `has no client for <os>/<arch> (published: none)` for every platform and stopped. Releases with tagged names still work. The hook itself is unchanged.
+
 ## [0.6.0] - 2026-11-13
 
 Secret-scan maintenance release — no new scans, inputs, or hooks. One consumer-visible change: the Pulse secret-scan job is renamed, so its status check becomes `… / pulse-secret`. A repository whose branch protection requires the old `… / pulse` check must update that rule in the same change that repins, or the rule waits on a check that never reports. Inputs, permissions, `failure_policy` behaviour, and every pre-commit hook are unchanged.

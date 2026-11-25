@@ -36,8 +36,9 @@ DEFAULT_PORT = 443
 CONNECT_TIMEOUT = 5.0
 API_TIMEOUT = 60.0
 ARCH_ALIASES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
-# Release assets are named code_scanning_git_client_<tag>_<os>_<arch>[.exe].
-ASSET_NAME = re.compile(r"^code_scanning_git_client_.+_(darwin|linux|windows)_(amd64|arm64)(?:\.exe)?$")
+# Release assets are named code_scanning_git_client_[<tag>_]<os>_<arch>[.exe]: releases before
+# prod-2026-11-24 put the tag in the name, later ones don't.
+ASSET_NAME = re.compile(r"^code_scanning_git_client_(?:.+_)?(darwin|linux|windows)_(amd64|arm64)(?:\.exe)?$")
 JOB_ARTIFACT = re.compile(r"/-/jobs/(\d+)/artifacts/raw/(.+)$")
 # ELF, PE, 64-bit Mach-O, universal Mach-O.
 EXECUTABLE_MAGIC = (b"\x7fELF", b"MZ", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
