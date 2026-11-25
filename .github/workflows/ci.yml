@@ -170,6 +170,28 @@ jobs:
             exit 1
           fi
 
+      # ProdSec dropped the release tag from the client asset names in prod-2026-11-24; both styles must resolve.
+      - name: Regression — GuardWords client setup finds tagged and untagged release assets
+        shell: bash
+        env:
+          PYTHONWARNINGS: error
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "hooks/guardwords")
+          import install_client
+
+          base = "https://gitlab.example/group/client/-/jobs/1/artifacts/raw/build/"
+          for tag in ("prod-2026-11-18_", ""):
+              names = [f"code_scanning_git_client_{tag}{build}" for build in ("linux_amd64", "darwin_arm64", "windows_amd64.exe")]
+              names.append(f"code_scanning_p4_client_{tag}linux_amd64")
+              release = {"tag_name": "prod-test", "assets": {"links": [{"url": base + name} for name in names]}}
+              for build in (("linux", "amd64"), ("darwin", "arm64"), ("windows", "amd64")):
+                  found, url = install_client._asset(release, [build])
+                  assert found == build and "_git_client_" in url, (tag, build, url)
+          print("tagged and untagged client assets resolve; the p4 client is ignored")
+          PY
+
   # ============================================================================
   # failure_policy: strict (strictest) — must fail on ANY finding
   # ============================================================================
